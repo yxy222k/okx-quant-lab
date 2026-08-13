@@ -8,8 +8,20 @@ import hmac
 import json
 from pathlib import Path
 import stat
-from urllib.error import HTTPError
+import time
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+
+class OkxApiError(RuntimeError):
+    """OKX rejected the request. `code` is the OKX error code (e.g. "51603"),
+    `http_status` the HTTP status when the failure was an HTTP error.
+    Subclasses RuntimeError so pre-existing handlers keep working."""
+
+    def __init__(self, message: str, code: str = "", http_status: int | None = None):
+        super().__init__(message)
+        self.code = code
+        self.http_status = http_status
 
 
 BASE_URL = "https://www.okx.com"
@@ -88,44 +100,78 @@ def private_request(
     request_path: str,
     body: dict | None = None,
 ) -> dict:
+    # Only GET is retried at the transport layer. A POST that times out may
+    # already have reached the exchange, so retrying it blindly risks a double
+    # fill — the idempotent clOrdId reconcile loop in demo_execution owns that.
+    attempts = 3 if method.upper() == "GET" else 1
     body_text = json.dumps(body) if body else ""
-    timestamp = _timestamp()
-    signature = sign(
-        credentials.secret_key, timestamp, method, request_path, body_text
-    )
 
-    request = Request(
-        f"{BASE_URL}{request_path}",
-        data=body_text.encode("utf-8") if body_text else None,
-        method=method,
-        headers={
-            "OK-ACCESS-KEY": credentials.api_key,
-            "OK-ACCESS-SIGN": signature,
-            "OK-ACCESS-TIMESTAMP": timestamp,
-            "OK-ACCESS-PASSPHRASE": credentials.passphrase,
-            "Content-Type": "application/json",
-            # Hard-coded on purpose: every request from this module is routed
-            # to OKX demo trading. There is no live-trading switch here.
-            "x-simulated-trading": "1",
-            "User-Agent": "okx-quant-lab/0.1",
-        },
-    )
+    for attempt in range(attempts):
+        # Sign inside the loop: OKX rejects stale timestamps, and a retry after
+        # a backoff sleep would otherwise carry one.
+        timestamp = _timestamp()
+        signature = sign(
+            credentials.secret_key, timestamp, method, request_path, body_text
+        )
 
-    try:
-        with urlopen(request, timeout=20) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")[:300]
+        request = Request(
+            f"{BASE_URL}{request_path}",
+            data=body_text.encode("utf-8") if body_text else None,
+            method=method,
+            headers={
+                "OK-ACCESS-KEY": credentials.api_key,
+                "OK-ACCESS-SIGN": signature,
+                "OK-ACCESS-TIMESTAMP": timestamp,
+                "OK-ACCESS-PASSPHRASE": credentials.passphrase,
+                "Content-Type": "application/json",
+                # Hard-coded on purpose: every request from this module is routed
+                # to OKX demo trading. There is no live-trading switch here.
+                "x-simulated-trading": "1",
+                "User-Agent": "okx-quant-lab/0.1",
+            },
+        )
+
         try:
-            body_payload = json.loads(detail)
-            detail = f"code={body_payload.get('code')} msg={body_payload.get('msg')}"
+            with urlopen(request, timeout=20) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            retryable = error.code == 429 or error.code >= 500
+            if retryable and attempt < attempts - 1:
+                time.sleep(retry_delay(error.headers.get("Retry-After"), attempt))
+                continue
+            detail = error.read().decode("utf-8", errors="replace")[:300]
+            code = ""
+            try:
+                body_payload = json.loads(detail)
+                code = str(body_payload.get("code") or "")
+                detail = f"code={body_payload.get('code')} msg={body_payload.get('msg')}"
+            except ValueError:
+                pass
+            raise OkxApiError(
+                f"OKX API HTTP {error.code}: {detail}", code=code, http_status=error.code
+            ) from error
+        except (TimeoutError, URLError):
+            if attempt < attempts - 1:
+                time.sleep(1 + attempt)
+                continue
+            raise  # network errors keep their OSError identity for callers
+
+        if payload.get("code") != "0":
+            raise OkxApiError(
+                f"OKX API error: code={payload.get('code')} msg={payload.get('msg')}",
+                code=str(payload.get("code") or ""),
+            )
+        return payload
+
+
+def retry_delay(retry_after_header: str | None, attempt: int) -> float:
+    """Honor Retry-After when the server sends one, else linear backoff."""
+    if retry_after_header:
+        try:
+            return max(0.0, float(retry_after_header))
         except ValueError:
             pass
-        raise RuntimeError(f"OKX API HTTP {error.code}: {detail}") from error
-
-    if payload.get("code") != "0":
-        raise RuntimeError(f"OKX API error: code={payload.get('code')} msg={payload.get('msg')}")
-    return payload
+    return 1.0 + attempt
 
 
 def sign(

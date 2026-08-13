@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import random
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -170,14 +171,31 @@ def _get_json(path: str, params: dict[str, str]) -> dict:
         headers={"User-Agent": "okx-quant-lab/0.1"},
     )
 
-    last_error: URLError | TimeoutError | None = None
+    last_error: Exception | None = None
     for attempt in range(3):
         try:
             with urlopen(request, timeout=20) as response:
                 return json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            # 429/5xx are transient — honor Retry-After when present. Other
+            # 4xx are our fault; retrying the same request is futile.
+            if error.code != 429 and error.code < 500:
+                raise RuntimeError(
+                    f"OKX public API HTTP {error.code}: {path}?{query}"
+                ) from error
+            last_error = error
+            if attempt < 2:
+                retry_after = error.headers.get("Retry-After")
+                try:
+                    delay = max(0.0, float(retry_after)) if retry_after else 1 + attempt
+                except ValueError:
+                    delay = 1 + attempt
+                time.sleep(delay)
         except (TimeoutError, URLError) as error:
             last_error = error
             if attempt < 2:
-                time.sleep(1 + attempt)
+                # Jitter keeps the three hourly cron markets from retrying in
+                # lockstep against the same choked endpoint.
+                time.sleep(1 + attempt + random.uniform(0, 0.5))
 
     raise RuntimeError(f"request failed after retries: {path}?{query}") from last_error

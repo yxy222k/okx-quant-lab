@@ -6,9 +6,14 @@ from pathlib import Path
 from typing import Callable
 
 from okx_quant_lab.dry_run import OrderRequest
-from okx_quant_lab.okx_demo_private import DemoCredentials, private_request
+from okx_quant_lab.okx_demo_private import DemoCredentials, OkxApiError, private_request
 from okx_quant_lab.safety import ExecutionIntent, evaluate_execution_safety
 from okx_quant_lab.state_store import load_ledger, save_ledger_atomic
+
+# OKX order-submission sCodes for "this clOrdId was already used".
+_DUPLICATE_CLORDID_SCODES = {"51015", "51016"}
+# OKX code for "order does not exist" when querying by clOrdId.
+_ORDER_NOT_FOUND_CODE = "51603"
 
 
 @dataclass(frozen=True)
@@ -118,7 +123,7 @@ class DemoOrderExecutor:
             body["sz"] = f"{request.base_quantity:.8f}"
             body["tgtCcy"] = "base_ccy"
 
-        payload = self._request_fn(self._credentials, "POST", "/api/v5/trade/order", body)
+        payload = self._post_order_idempotent(request.inst_id, body)
         result = (payload.get("data") or [{}])[0]
         if result.get("sCode") != "0":
             return self._record(
@@ -142,6 +147,68 @@ class DemoOrderExecutor:
             fee_currency=details.get("feeCcy", ""),
             message=f"demo order state={state or 'unknown'}",
         )
+
+    def _post_order_idempotent(self, inst_id: str, body: dict, attempts: int = 3) -> dict:
+        """Submit the order; never a blind retry.
+
+        After a network failure or retryable HTTP error the original POST may
+        already have filled on the exchange, so each retry round first queries
+        by clOrdId: found -> synthesize an accepted payload and reconcile via
+        the normal confirm path; confirmed absent -> resubmitting the SAME
+        clOrdId is safe. A duplicate-clOrdId rejection is handled the same way.
+        If the probe itself fails, the exception propagates and submit()
+        records ERROR, consuming the id — uncertainty must never auto-retry.
+        """
+        cl_ord_id = body["clOrdId"]
+        last_error: Exception | None = None
+
+        for attempt in range(attempts):
+            try:
+                payload = self._request_fn(
+                    self._credentials, "POST", "/api/v5/trade/order", body
+                )
+            except OkxApiError as error:
+                status = error.http_status or 0
+                if status != 429 and status < 500:
+                    raise  # 4xx / API-level rejections: retrying is futile
+                last_error = error
+            except OSError as error:  # TimeoutError, URLError, connection resets
+                last_error = error
+            else:
+                result = (payload.get("data") or [{}])[0]
+                if result.get("sCode") not in _DUPLICATE_CLORDID_SCODES:
+                    return payload
+                last_error = RuntimeError(
+                    f"duplicate clOrdId {cl_ord_id}: {result.get('sMsg', '')}"
+                )
+
+            existing = self._find_order_by_client_id(inst_id, cl_ord_id)
+            if existing is not None:
+                # The lost/duplicated submission actually landed.
+                return {
+                    "code": "0",
+                    "data": [{"sCode": "0", "ordId": existing.get("ordId", "")}],
+                }
+
+        raise RuntimeError(
+            f"order POST failed after {attempts} attempts "
+            f"(clOrdId {cl_ord_id} not on exchange): {last_error}"
+        ) from last_error
+
+    def _find_order_by_client_id(self, inst_id: str, cl_ord_id: str) -> dict | None:
+        """Query by clOrdId; None means the exchange confirmed it doesn't exist."""
+        try:
+            payload = self._request_fn(
+                self._credentials,
+                "GET",
+                f"/api/v5/trade/order?instId={inst_id}&clOrdId={cl_ord_id}",
+            )
+        except OkxApiError as error:
+            if error.code == _ORDER_NOT_FOUND_CODE:
+                return None
+            raise
+        rows = payload.get("data") or []
+        return rows[0] if rows else None
 
     def _fetch_order_details(self, inst_id: str, order_id: str) -> dict:
         payload = self._request_fn(
