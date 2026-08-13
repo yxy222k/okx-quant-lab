@@ -16,11 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
-# Make the sibling `from reconcile_grids import ...` resolve regardless of how
-# the launcher invokes this script (cron wrapper, python -m, embedded import).
-SCRIPTS = ROOT / "scripts"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
 
 from okx_quant_lab.candle_store import load_candles_csv
 from okx_quant_lab.demo_execution import load_demo_order_ledger
@@ -94,7 +89,7 @@ def main() -> int:
 def _reconcile_line() -> str:
     """Compact paper-vs-demo reconciliation: fill-count ratio and equity gap."""
     try:
-        from reconcile_grids import MARKETS, reconcile_market
+        from okx_quant_lab.reconcile import MARKETS, reconcile_market
 
         fills = []
         gaps = []
@@ -102,7 +97,7 @@ def _reconcile_line() -> str:
         worst_gap = 0.0
         stale = []
         for inst_id in MARKETS:
-            row = reconcile_market(inst_id)
+            row = reconcile_market(inst_id, ROOT)
             if not row:
                 continue
             if row.get("status") == "insufficient_history":

@@ -7,14 +7,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
-SCRIPTS = ROOT / "scripts"
-for p in (str(SRC), str(SCRIPTS)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 
 from okx_quant_lab.demo_grid import DemoGridConfig, new_demo_grid_state
 from okx_quant_lab.okx_public import Candle
-from reconcile_grids import _replay_window
+from okx_quant_lab.reconcile import replay_window as _replay_window
 
 
 def _candles(n: int, start_ms: int = 1_700_000_000_000, step_ms: int = 900_000):
