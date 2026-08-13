@@ -21,7 +21,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from okx_quant_lab.candle_store import load_candles_csv, merge_candles, save_candles_csv
+from okx_quant_lab.candle_store import refresh_candles
 from okx_quant_lab.donchian_paper import (
     DonchianPaperConfig,
     donchian_paper_equity,
@@ -44,7 +44,6 @@ from okx_quant_lab.monitoring import (
     check_grid_state_caught_up,
     check_paper_state_caught_up,
 )
-from okx_quant_lab.okx_public import fetch_candles
 from okx_quant_lab.paper import (
     PaperConfig,
     load_paper_state,
@@ -164,11 +163,7 @@ def _run_update() -> tuple[list[str], bool, bool]:
 
 def _refresh_candles(inst_id: str) -> list:
     path = ROOT / "data" / "candles" / f"{inst_id}_1H_scan.csv"
-    existing = load_candles_csv(path) if path.exists() else []
-    latest = fetch_candles(inst_id, bar="1H", limit=200)
-    candles = merge_candles(existing, latest)
-    save_candles_csv(path, candles)
-    return candles
+    return refresh_candles(path, inst_id, bar="1H", target_count=300)
 
 
 def _write_report(lines: list[str], now_ms: int) -> None:

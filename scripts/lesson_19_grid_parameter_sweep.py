@@ -11,9 +11,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from okx_quant_lab.candle_store import load_candles_csv, save_candles_csv
+from okx_quant_lab.candle_store import refresh_candles
 from okx_quant_lab.grid_optimization import GridSweepResult, sweep_grid_parameters
-from okx_quant_lab.okx_public import Candle, fetch_historical_candles
+from okx_quant_lab.okx_public import Candle
 from okx_quant_lab.optimization import train_test_split
 
 
@@ -72,15 +72,8 @@ def _load_or_fetch_deep_candles(
     target_count: int,
     path: Path,
 ) -> list[Candle]:
-    if path.exists():
-        candles = load_candles_csv(path)
-        print(f"loaded {len(candles)} candles from {path}")
-        return candles
-
-    print(f"fetching {target_count} public {bar} candles for {inst_id} ...")
-    candles = fetch_historical_candles(inst_id, bar=bar, target_count=target_count)
-    save_candles_csv(path, candles)
-    print(f"saved {len(candles)} candles to {path}")
+    candles = refresh_candles(path, inst_id, bar=bar, target_count=target_count)
+    print(f"refreshed {len(candles)} candles in {path}")
     return candles
 
 

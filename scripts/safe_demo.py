@@ -12,7 +12,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from okx_quant_lab.backtest import BacktestConfig
-from okx_quant_lab.candle_store import load_candles_csv, merge_candles, save_candles_csv
+from okx_quant_lab.candle_store import refresh_candles
 from okx_quant_lab.demo import (
     SAFETY_STATUS,
     build_safe_demo_report,
@@ -20,7 +20,6 @@ from okx_quant_lab.demo import (
     render_demo_markdown,
 )
 from okx_quant_lab.grid_strategy import grid_config_from_reference
-from okx_quant_lab.okx_public import fetch_candles, fetch_historical_candles
 from okx_quant_lab.paper import (
     PaperConfig,
     load_paper_state,
@@ -38,12 +37,7 @@ def main() -> int:
     markdown_path = ROOT / "reports" / "safe_demo_report.md"
     html_path = ROOT / "reports" / "safe_demo_dashboard.html"
 
-    existing = load_candles_csv(candle_path) if candle_path.exists() else []
-    if len(existing) < 300:
-        existing = fetch_historical_candles(inst_id, bar=bar, target_count=500)
-    latest = fetch_candles(inst_id, bar=bar, limit=200)
-    candles = merge_candles(existing, latest)[-500:]
-    save_candles_csv(candle_path, candles)
+    candles = refresh_candles(candle_path, inst_id, bar=bar, target_count=500, retention=500)
 
     paper_config = PaperConfig(
         inst_id=inst_id,

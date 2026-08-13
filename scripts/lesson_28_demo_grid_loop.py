@@ -24,7 +24,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from okx_quant_lab.candle_store import load_candles_csv, merge_candles, save_candles_csv
+from okx_quant_lab.candle_store import refresh_candles
 from okx_quant_lab.demo_execution import (
     DemoExecutionLimits,
     DemoOrderExecutor,
@@ -41,7 +41,7 @@ from okx_quant_lab.demo_grid import (
     save_demo_grid_state,
 )
 from okx_quant_lab.okx_demo_private import load_demo_credentials
-from okx_quant_lab.okx_public import fetch_candles, fetch_instrument_spec
+from okx_quant_lab.okx_public import fetch_instrument_spec
 
 
 BAR = "15m"
@@ -112,12 +112,11 @@ def main() -> int:
 
 def _run_market(inst_id: str, credentials, confirmed: bool) -> tuple[list[str], bool]:
     config = market_config(inst_id)
-    existing = load_candles_csv(candle_path(inst_id)) if candle_path(inst_id).exists() else []
-    latest = fetch_candles(inst_id, bar=BAR, limit=200)
     # Retain enough history to cover the whole demo phase so reconcile_grids can
     # always replay from the deploy candle. 12000 15m bars ~= 125 days (~1 MB CSV).
-    candles = merge_candles(existing, latest)[-CANDLE_RETENTION:]
-    save_candles_csv(candle_path(inst_id), candles)
+    candles = refresh_candles(
+        candle_path(inst_id), inst_id, bar=BAR, target_count=300, retention=CANDLE_RETENTION
+    )
 
     spec = fetch_instrument_spec(inst_id)
     records = load_demo_order_ledger(ledger_path(inst_id)) if ledger_path(inst_id).exists() else []

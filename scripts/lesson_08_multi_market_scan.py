@@ -11,8 +11,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from okx_quant_lab.backtest import BacktestConfig
-from okx_quant_lab.candle_store import load_candles_csv, save_candles_csv
-from okx_quant_lab.okx_public import fetch_historical_candles
+from okx_quant_lab.candle_store import refresh_candles
 from okx_quant_lab.risk import RiskLimits
 from okx_quant_lab.scanner import scan_symbols
 
@@ -70,14 +69,8 @@ def main() -> int:
 
 
 def _load_or_fetch(inst_id: str, bar: str, target_count: int, path: Path):
-    if path.exists():
-        candles = load_candles_csv(path)
-        if len(candles) >= target_count:
-            return candles[-target_count:]
-
-    candles = fetch_historical_candles(inst_id, bar=bar, target_count=target_count)
-    save_candles_csv(path, candles)
-    return candles
+    # Incremental refresh every run: a full cache no longer means a stale scan.
+    return refresh_candles(path, inst_id, bar=bar, target_count=target_count)[-target_count:]
 
 
 if __name__ == "__main__":

@@ -10,8 +10,79 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from okx_quant_lab.candle_store import load_candles_csv, merge_candles, save_candles_csv
+from okx_quant_lab.candle_store import (
+    load_candles_csv,
+    merge_candles,
+    refresh_candles,
+    save_candles_csv,
+)
 from okx_quant_lab.okx_public import Candle
+
+
+def _candle(ts: int, close: float = 100.0) -> Candle:
+    return Candle(
+        timestamp_ms=ts,
+        open=close,
+        high=close + 1,
+        low=close - 1,
+        close=close,
+        volume_base=1.0,
+        volume_quote=close,
+        confirmed=True,
+    )
+
+
+class RefreshCandlesTest(unittest.TestCase):
+    def test_existing_cache_is_merged_with_latest_not_skipped(self) -> None:
+        # The lesson_08 trap: a full cache must still pick up newer candles.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.csv"
+            save_candles_csv(path, [_candle(1), _candle(2), _candle(3)])
+
+            merged = refresh_candles(
+                path,
+                "SOL-USDT",
+                target_count=3,
+                fetch_latest=lambda inst_id, bar, limit: [_candle(3, 105.0), _candle(4)],
+                fetch_history=lambda **kwargs: self.fail("history fetch not needed"),
+            )
+
+            self.assertEqual([c.timestamp_ms for c in merged], [1, 2, 3, 4])
+            self.assertEqual(merged[2].close, 105.0)  # newer duplicate wins
+            self.assertEqual(len(load_candles_csv(path)), 4)  # persisted
+
+    def test_short_cache_is_backfilled_to_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.csv"
+
+            merged = refresh_candles(
+                path,
+                "SOL-USDT",
+                target_count=4,
+                fetch_latest=lambda inst_id, bar, limit: [_candle(9), _candle(10)],
+                fetch_history=lambda inst_id, bar, target_count: [
+                    _candle(ts) for ts in range(6, 10)
+                ],
+            )
+
+            self.assertEqual([c.timestamp_ms for c in merged], [6, 7, 8, 9, 10])
+
+    def test_retention_trims_the_saved_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.csv"
+            save_candles_csv(path, [_candle(ts) for ts in range(1, 6)])
+
+            merged = refresh_candles(
+                path,
+                "SOL-USDT",
+                target_count=2,
+                retention=3,
+                fetch_latest=lambda inst_id, bar, limit: [_candle(6)],
+                fetch_history=lambda **kwargs: self.fail("history fetch not needed"),
+            )
+
+            self.assertEqual([c.timestamp_ms for c in merged], [4, 5, 6])
+            self.assertEqual([c.timestamp_ms for c in load_candles_csv(path)], [4, 5, 6])
 
 
 class CandleStoreTest(unittest.TestCase):
