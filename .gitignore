@@ -1,0 +1,16 @@
+# Generated data & reports (recreated by scripts / cron)
+data/
+reports/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Claude Code local config — contains credentials (see todo P0-1), never commit
+.claude/
+
+# Freqtrade runtime data (sqlite / feather / downloaded candles)
+freqtrade_lab/user_data/
