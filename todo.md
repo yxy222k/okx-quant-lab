@@ -99,7 +99,7 @@
   - 代码使用 `X | None` 联合类型与内建泛型（如 `okx_public.py:92`、`backtest.py:8`）；纯 stdlib，无三方依赖。
   - 动作：加 `pyproject.toml`（`requires-python = ">=3.10"`）或在 README 声明。
 
-- [ ] **补测试盲区**
+- [x] **补测试盲区**（2026-08-13 完成：新增 7 个测试文件 + 扩充 4 个，115 → 227 tests；对齐锁定测试含「错误对齐必不成立」的反证用例）
   - 零测试：`hourly_update.py`、`daily_summary.py`、`show_ledger.py`、`retire_grid.py`、`lesson_28_demo_grid_loop.py`。
   - 极薄：`okx_public`（1 个）、`scanner`（1）、`portfolio`（2）、`risk`（2）。
   - 重点补：① 锁定三种网格触发语义差异（`grid_strategy` high/low vs `demo_grid` close-confirmed），防重构时被无意统一；② **dry-run 与 backtest 信号对齐的锁定测试**：对每个 t（`slow_window - 1 ≤ t ≤ N-2`，上界因 backtest 需 index `t+1` 存在），断言 `sma_signal(candles[:t+1])` == backtest 在 index `t+1` 的 `wants_long`。实现注意：backtest 不对外暴露逐步 `wants_long`，测试需自建小 helper 按同一约定算滚动均值（或导出决策序列）来比。两侧在**同一成交时刻**（open[t+1]）的约定一致：backtest 在 t+1 决策用 closes≤t 并成交于 open[t+1]（`backtest.py:68-86,138`），dry-run 在蜡烛 t 收盘后用 closes≤t 算信号、市价单 ≈ open[t+1] 成交（`dry_run.py:40`；`okx_public.py:73-74` 默认过滤未确认蜡烛，无偷看）。用测试锁死此对齐，防止将来被当作 off-by-one "修"坏（2026-08-13 审查曾误报此点为 bug）。
