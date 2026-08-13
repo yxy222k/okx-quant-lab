@@ -22,6 +22,14 @@ from okx_quant_lab.paper import PaperConfig, load_paper_state
 
 
 def main() -> int:
+    try:
+        return _run()
+    except Exception as error:  # missing/corrupt data should report, not crash
+        print(f"lesson 10 monitoring FAILED: {type(error).__name__}: {error}")
+        return 1
+
+
+def _run() -> int:
     inst_ids = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "DOGE-USDT"]
     now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
     checks = []

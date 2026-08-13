@@ -31,12 +31,26 @@ INST_IDS = ["BTC-USDT", "ETH-USDT", "SOL-USDT", "XRP-USDT", "DOGE-USDT"]
 
 
 def main() -> int:
+    try:
+        return _run()
+    except Exception as error:  # missing/corrupt data should report, not crash
+        print(f"lesson 25 scoreboard FAILED: {type(error).__name__}: {error}")
+        return 1
+
+
+def _run() -> int:
     report_path = ROOT / "reports" / "lesson_25_lab_scoreboard.md"
     rules = LabScoreRules()
-    candle_map = {
-        inst_id: load_candles_csv(ROOT / "data" / "candles" / f"{inst_id}_1H_scan.csv")
-        for inst_id in INST_IDS
-    }
+    candle_map = {}
+    for inst_id in INST_IDS:
+        path = ROOT / "data" / "candles" / f"{inst_id}_1H_scan.csv"
+        try:
+            candle_map[inst_id] = load_candles_csv(path)
+        except (OSError, ValueError, KeyError) as error:
+            print(f"skipping {inst_id}: cannot read {path.name} ({type(error).__name__})")
+    if not candle_map:
+        print("no candle data available; run lesson_08 or hourly_update first")
+        return 1
 
     scores = [
         score_lab_strategy("sma(20,50)", _sma_metrics(candle_map), rules),

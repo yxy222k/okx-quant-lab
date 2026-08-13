@@ -8,6 +8,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 from pathlib import Path
 import sys
 import time
@@ -78,7 +79,10 @@ def main() -> int:
             if record.status == "FILLED":
                 print(f"  fill={record.fill_price:.4f} qty={record.fill_quantity:.6f}")
 
-    archive = args.state_path.with_suffix(".json.retired")
+    # Timestamped so a rerun can never silently clobber an earlier archive
+    # (POSIX rename overwrites an existing target without complaint).
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    archive = args.state_path.with_name(f"{args.state_path.name}.retired.{stamp}")
     args.state_path.rename(archive)
     print(f"state archived to: {archive}")
     return 0
