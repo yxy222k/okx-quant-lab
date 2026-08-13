@@ -5,15 +5,16 @@ from dataclasses import dataclass
 from okx_quant_lab.market_math import close_long, liquidation_equity, open_long
 from okx_quant_lab.okx_public import Candle
 from okx_quant_lab.paper import (
-    PaperFill,
     PaperState,
     load_paper_state,
+    paper_buy,
+    paper_sell,
     save_paper_state,
 )
 
 
-# The Donchian paper session reuses PaperState/PaperFill and their JSON
-# persistence from paper.py; only the signal differs from the SMA session.
+# The Donchian paper session reuses PaperState/PaperFill, the fill functions,
+# and the JSON persistence from paper.py; only the signal differs.
 __all__ = [
     "DonchianPaperConfig",
     "new_donchian_paper_state",
@@ -62,10 +63,10 @@ def run_donchian_paper_session(
             exit_channel_low = min(closes[index - 1 - config.exit_window : index - 1])
 
             if asset == 0 and cash > 0 and previous_close > entry_channel_high:
-                cash, asset, fill = _paper_buy(candle, cash, asset, config)
+                cash, asset, fill = paper_buy(candle, cash, asset, config)
                 fills.append(fill)
             elif asset > 0 and previous_close < exit_channel_low:
-                cash, asset, fill = _paper_sell(candle, cash, asset, config)
+                cash, asset, fill = paper_sell(candle, cash, asset, config)
                 fills.append(fill)
 
         last_timestamp_ms = candle.timestamp_ms
@@ -86,53 +87,3 @@ def donchian_paper_equity(
     return liquidation_equity(
         state.cash, state.asset, mark_price, config.fee_rate, config.slippage_bps
     )
-
-
-def _paper_buy(
-    candle: Candle,
-    cash: float,
-    asset: float,
-    config: DonchianPaperConfig,
-) -> tuple[float, float, PaperFill]:
-    fill = open_long(
-        candle.open, cash, config.fee_rate, config.slippage_bps, config.trade_fraction
-    )
-    asset_after = asset + fill.quantity
-
-    return (
-        fill.cash_after,
-        asset_after,
-        PaperFill(
-            timestamp_ms=candle.timestamp_ms,
-            side="BUY",
-            price=fill.fill_price,
-            quantity=fill.quantity,
-            fee=fill.fee,
-            cash_after=fill.cash_after,
-            asset_after=asset_after,
-        ),
-    )
-
-
-def _paper_sell(
-    candle: Candle,
-    cash: float,
-    asset: float,
-    config: DonchianPaperConfig,
-) -> tuple[float, float, PaperFill]:
-    fill = close_long(candle.open, cash, asset, config.fee_rate, config.slippage_bps)
-
-    return (
-        fill.cash_after,
-        0.0,
-        PaperFill(
-            timestamp_ms=candle.timestamp_ms,
-            side="SELL",
-            price=fill.fill_price,
-            quantity=fill.quantity,
-            fee=fill.fee,
-            cash_after=fill.cash_after,
-            asset_after=0.0,
-        ),
-    )
-

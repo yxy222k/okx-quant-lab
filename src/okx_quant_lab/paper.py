@@ -69,10 +69,10 @@ def run_paper_session(
             wants_long = fast_ma > slow_ma
 
             if wants_long and asset == 0 and cash > 0:
-                cash, asset, fill = _paper_buy(candle, cash, asset, config)
+                cash, asset, fill = paper_buy(candle, cash, asset, config)
                 fills.append(fill)
             elif not wants_long and asset > 0:
-                cash, asset, fill = _paper_sell(candle, cash, asset, config)
+                cash, asset, fill = paper_sell(candle, cash, asset, config)
                 fills.append(fill)
 
         last_timestamp_ms = candle.timestamp_ms
@@ -106,12 +106,13 @@ def load_paper_state(path: Path) -> PaperState:
     )
 
 
-def _paper_buy(
+def paper_buy(
     candle: Candle,
     cash: float,
     asset: float,
     config: PaperConfig,
 ) -> tuple[float, float, PaperFill]:
+    """Duck-typed on config: any config with fee_rate/slippage_bps/trade_fraction works."""
     fill = open_long(
         candle.open, cash, config.fee_rate, config.slippage_bps, config.trade_fraction
     )
@@ -132,12 +133,13 @@ def _paper_buy(
     )
 
 
-def _paper_sell(
+def paper_sell(
     candle: Candle,
     cash: float,
     asset: float,
     config: PaperConfig,
 ) -> tuple[float, float, PaperFill]:
+    """Duck-typed on config: any config with fee_rate/slippage_bps works."""
     fill = close_long(candle.open, cash, asset, config.fee_rate, config.slippage_bps)
 
     return (
