@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 
 VALID_MODES = {"paper", "demo", "live"}
+LIVE_MODE_ENV = "OKX_ALLOW_LIVE"
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,16 @@ def evaluate_execution_safety(intent: ExecutionIntent) -> SafetyDecision:
 
 
 def _check_mode(intent: ExecutionIntent) -> SafetyCheck:
+    # Defense in depth: nothing in this lab may trade live unless the operator
+    # flips an explicit environment switch. Until then the gate itself refuses,
+    # instead of relying on every caller hard-coding mode="demo" (the private
+    # client additionally pins the x-simulated-trading header).
+    if intent.mode == "live" and os.environ.get(LIVE_MODE_ENV) != "1":
+        return SafetyCheck(
+            name="mode",
+            passed=False,
+            message=f"live trading is disabled (set {LIVE_MODE_ENV}=1 to allow)",
+        )
     passed = intent.mode in VALID_MODES
     return SafetyCheck(
         name="mode",

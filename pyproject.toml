@@ -1,0 +1,10 @@
+[project]
+name = "okx-quant-lab"
+version = "0.1.0"
+description = "Stdlib-only OKX quant lab: backtests, paper trading, demo-account execution"
+# X | Y unions and builtin generics are used at runtime in places; TimeoutError
+# being an OSError alias (relied on by the execution error handling) is 3.10+.
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -225,7 +225,14 @@ class DemoOrderExecutor:
             f"/api/v5/trade/order?instId={inst_id}&ordId={order_id}",
         )
         rows = payload.get("data") or []
-        return rows[0] if rows else {}
+        details = rows[0] if rows else {}
+        returned_id = details.get("ordId", "")
+        if returned_id and returned_id != order_id:
+            # Never book another order's fill into this record.
+            raise RuntimeError(
+                f"order lookup mismatch: asked for {order_id}, got {returned_id}"
+            )
+        return details
 
     def _notional_block_message(self, request: OrderRequest) -> str | None:
         if request.side not in {"BUY", "SELL"}:
@@ -301,7 +308,10 @@ def load_demo_order_ledger(path: Path) -> list[DemoOrderRecord]:
 def _exchange_client_order_id(client_order_id: str) -> str:
     # OKX clOrdId allows at most 32 alphanumeric characters; our internal ids
     # are longer and contain separators, so ship a stable hash instead.
-    return hashlib.md5(client_order_id.encode("utf-8")).hexdigest()
+    # SHA256[:32] rather than MD5: same width, quiets security scanners.
+    # Only affects orders submitted after the change; ledger dedup keys on the
+    # internal id, so historical records stay valid.
+    return hashlib.sha256(client_order_id.encode("utf-8")).hexdigest()[:32]
 
 
 def _record_from_dict(row: dict) -> DemoOrderRecord:
