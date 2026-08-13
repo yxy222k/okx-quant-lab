@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from okx_quant_lab.grid_strategy import grid_config_from_reference, run_grid_backtest
 from okx_quant_lab.okx_public import Candle
+from okx_quant_lab.walk_forward_core import rank_sweep_results
 
 
 @dataclass(frozen=True)
@@ -78,12 +79,4 @@ def sweep_grid_parameters(
                 )
             )
 
-    return sorted(
-        results,
-        key=lambda result: (
-            result.train_return_pct,
-            result.test_return_pct,
-            -abs(result.overfit_gap_pct),
-        ),
-        reverse=True,
-    )
+    return rank_sweep_results(results)

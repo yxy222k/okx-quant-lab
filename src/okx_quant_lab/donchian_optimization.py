@@ -7,6 +7,7 @@ from okx_quant_lab.donchian_strategy import (
     run_donchian_breakout_backtest,
 )
 from okx_quant_lab.okx_public import Candle
+from okx_quant_lab.walk_forward_core import rank_sweep_results
 
 
 @dataclass(frozen=True)
@@ -64,12 +65,4 @@ def sweep_donchian_parameters(
                 )
             )
 
-    return sorted(
-        results,
-        key=lambda result: (
-            result.train_return_pct,
-            result.test_return_pct,
-            -abs(result.overfit_gap_pct),
-        ),
-        reverse=True,
-    )
+    return rank_sweep_results(results)
