@@ -60,37 +60,68 @@ def run_sma_backtest(candles: list[Candle], config: BacktestConfig) -> BacktestR
     # regardless of caller (mirrors run_donchian_breakout_backtest). A no-op for
     # the load_candles_csv / paper callers, which already pass ascending data.
     candles = sorted(candles, key=lambda candle: candle.timestamp_ms)
+    decisions = sma_wants_long(
+        [candle.close for candle in candles], config.fast_window, config.slow_window
+    )
+    return replay_sma_decisions(candles, decisions, config)
+
+
+def sma_wants_long(
+    closes: list[float],
+    fast_window: int,
+    slow_window: int,
+) -> list[bool | None]:
+    """The decision the SMA cross makes AT each index, from the closes strictly
+    before it: None during warmup, else fast MA > slow MA. Single source of
+    signal truth for backtest, paper replay, and position sizing; the live
+    counterpart is dry_run.sma_signal over the candles before that index
+    (both fill at the same next open).
+    """
+    decisions: list[bool | None] = [None] * len(closes)
+    # Rolling sums over the closes strictly before the current index, so each
+    # step costs O(1) instead of re-slicing and re-summing both windows.
+    fast_sum = 0.0
+    slow_sum = 0.0
+
+    for index, close in enumerate(closes):
+        if index >= slow_window:
+            decisions[index] = (fast_sum / fast_window) > (slow_sum / slow_window)
+        fast_sum += close
+        if index >= fast_window:
+            fast_sum -= closes[index - fast_window]
+        slow_sum += close
+        if index >= slow_window:
+            slow_sum -= closes[index - slow_window]
+
+    return decisions
+
+
+def replay_sma_decisions(
+    candles: list[Candle],
+    decisions: list[bool | None],
+    config: BacktestConfig,
+) -> BacktestResult:
+    """Execute a precomputed decision sequence (candles ascending, 1:1 with
+    decisions). Splitting signal from execution lets position-sizing scans
+    reuse one signal pass across many trade fractions."""
+    _validate_inputs(candles, config)
+    if len(decisions) != len(candles):
+        raise ValueError("decisions must align 1:1 with candles")
 
     cash = config.initial_cash
     asset = 0.0
     trades: list[Trade] = []
     equity_curve: list[EquityPoint] = []
 
-    closes = [candle.close for candle in candles]
-    # Rolling sums over the closes strictly before the current candle, so each
-    # step costs O(1) instead of re-slicing and re-summing both windows.
-    fast_sum = 0.0
-    slow_sum = 0.0
-
     for index, candle in enumerate(candles):
-        if index >= config.slow_window:
-            fast_ma = fast_sum / config.fast_window
-            slow_ma = slow_sum / config.slow_window
-            wants_long = fast_ma > slow_ma
-
+        wants_long = decisions[index]
+        if wants_long is not None:
             if wants_long and asset == 0:
                 cash, asset, trade = _buy(candle, cash, asset, config)
                 trades.append(trade)
             elif not wants_long and asset > 0:
                 cash, asset, trade = _sell(candle, cash, asset, config)
                 trades.append(trade)
-
-        fast_sum += closes[index]
-        if index >= config.fast_window:
-            fast_sum -= closes[index - config.fast_window]
-        slow_sum += closes[index]
-        if index >= config.slow_window:
-            slow_sum -= closes[index - config.slow_window]
 
         equity = liquidation_equity(
             cash, asset, candle.close, config.fee_rate, config.slippage_bps

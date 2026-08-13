@@ -83,6 +83,9 @@ def build_sma_order_request(
 class DryRunOrderManager:
     def __init__(self, orders: list[DryRunOrder] | None = None) -> None:
         self._orders = list(orders or [])
+        self._by_client_order_id = {
+            order.request.client_order_id: order for order in self._orders
+        }
 
     @property
     def orders(self) -> list[DryRunOrder]:
@@ -104,22 +107,18 @@ class DryRunOrderManager:
                 status="BLOCKED",
                 message=blocked_message,
             )
-            self._orders.append(order)
-            return order
-
-        order = DryRunOrder(
-            request=request,
-            status="DRY_FILLED",
-            message="dry-run fill recorded locally; no exchange order submitted",
-        )
+        else:
+            order = DryRunOrder(
+                request=request,
+                status="DRY_FILLED",
+                message="dry-run fill recorded locally; no exchange order submitted",
+            )
         self._orders.append(order)
+        self._by_client_order_id[request.client_order_id] = order
         return order
 
     def _find_by_client_order_id(self, client_order_id: str) -> DryRunOrder | None:
-        for order in self._orders:
-            if order.request.client_order_id == client_order_id:
-                return order
-        return None
+        return self._by_client_order_id.get(client_order_id)
 
 
 def save_order_ledger(path: Path, orders: list[DryRunOrder]) -> None:

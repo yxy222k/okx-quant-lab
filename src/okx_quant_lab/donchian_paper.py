@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from okx_quant_lab.market_math import close_long, liquidation_equity, open_long
+from okx_quant_lab.indicators import rolling_max, rolling_min
+from okx_quant_lab.market_math import liquidation_equity
 from okx_quant_lab.okx_public import Candle
 from okx_quant_lab.paper import (
     PaperState,
@@ -52,6 +53,8 @@ def run_donchian_paper_session(
     fills = list(state.fills)
     last_timestamp_ms = state.last_timestamp_ms
     warmup = max(config.entry_window, config.exit_window) + 1
+    entry_highs = rolling_max(closes, config.entry_window)
+    exit_lows = rolling_min(closes, config.exit_window)
 
     for index, candle in enumerate(sorted_candles):
         if candle.timestamp_ms <= state.last_timestamp_ms:
@@ -59,8 +62,8 @@ def run_donchian_paper_session(
 
         if index >= warmup:
             previous_close = closes[index - 1]
-            entry_channel_high = max(closes[index - 1 - config.entry_window : index - 1])
-            exit_channel_low = min(closes[index - 1 - config.exit_window : index - 1])
+            entry_channel_high = entry_highs[index - 1]
+            exit_channel_low = exit_lows[index - 1]
 
             if asset == 0 and cash > 0 and previous_close > entry_channel_high:
                 cash, asset, fill = paper_buy(candle, cash, asset, config)

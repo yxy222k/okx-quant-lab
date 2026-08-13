@@ -161,9 +161,16 @@ def _run_update() -> tuple[list[str], bool, bool]:
     return lines, attention, has_failures
 
 
+# ~16 months of hourly bars (~1 MB CSV) — same retention idea as lesson_28's
+# CANDLE_RETENTION: plenty for every scan/backtest consumer, bounded on disk.
+CANDLE_RETENTION_1H = 12_000
+
+
 def _refresh_candles(inst_id: str) -> list:
     path = ROOT / "data" / "candles" / f"{inst_id}_1H_scan.csv"
-    return refresh_candles(path, inst_id, bar="1H", target_count=300)
+    return refresh_candles(
+        path, inst_id, bar="1H", target_count=300, retention=CANDLE_RETENTION_1H
+    )
 
 
 def _write_report(lines: list[str], now_ms: int) -> None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections import deque
+
 
 def simple_moving_average(values: list[float], window: int) -> list[float | None]:
     if window <= 0:
@@ -58,3 +60,37 @@ def _rsi_from_averages(avg_gain: float, avg_loss: float) -> float:
 
     relative_strength = avg_gain / avg_loss
     return 100 - (100 / (1 + relative_strength))
+
+
+def rolling_max(values: list[float], window: int) -> list[float | None]:
+    """result[i] = max(values[i-window : i]) — the window strictly before i;
+    None while the window isn't full. Monotonic deque, O(1) amortized."""
+    return _rolling_extreme(values, window, greater=True)
+
+
+def rolling_min(values: list[float], window: int) -> list[float | None]:
+    """result[i] = min(values[i-window : i]); see rolling_max."""
+    return _rolling_extreme(values, window, greater=False)
+
+
+def _rolling_extreme(values: list[float], window: int, greater: bool) -> list[float | None]:
+    if window <= 0:
+        raise ValueError("window must be positive")
+
+    result: list[float | None] = [None] * len(values)
+    candidates: deque[int] = deque()  # indices; values monotone from the front
+
+    for index in range(len(values)):
+        while candidates and candidates[0] < index - window:
+            candidates.popleft()
+        if index >= window:
+            result[index] = values[candidates[0]]
+        while candidates and (
+            values[candidates[-1]] <= values[index]
+            if greater
+            else values[candidates[-1]] >= values[index]
+        ):
+            candidates.pop()
+        candidates.append(index)
+
+    return result

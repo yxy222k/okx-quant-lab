@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from okx_quant_lab.indicators import rolling_max, rolling_min
 from okx_quant_lab.market_math import (
     close_long,
     liquidation_equity,
@@ -57,12 +58,14 @@ def run_donchian_breakout_backtest(
     # previous close must break out of the channel formed by the window of
     # closes before it. Fills happen at the current candle open.
     warmup = max(config.entry_window, config.exit_window) + 1
+    entry_highs = rolling_max(closes, config.entry_window)
+    exit_lows = rolling_min(closes, config.exit_window)
 
     for index, candle in enumerate(sorted_candles):
         if index >= warmup:
             previous_close = closes[index - 1]
-            entry_channel_high = max(closes[index - 1 - config.entry_window : index - 1])
-            exit_channel_low = min(closes[index - 1 - config.exit_window : index - 1])
+            entry_channel_high = entry_highs[index - 1]
+            exit_channel_low = exit_lows[index - 1]
 
             if asset == 0 and previous_close > entry_channel_high:
                 cash, asset, trade = _buy(candle, cash, asset, config)

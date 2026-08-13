@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from okx_quant_lab.backtest import sma_wants_long
 from okx_quant_lab.market_math import close_long, liquidation_equity, open_long
 from okx_quant_lab.state_store import load_versioned_json, save_json_atomic
 from okx_quant_lab.okx_public import Candle
@@ -58,16 +59,20 @@ def run_paper_session(
     fills = list(state.fills)
     last_timestamp_ms = state.last_timestamp_ms
 
+    # Same O(1) rolling signal as the backtest; candles at or before the
+    # persisted checkpoint still feed the windows, they just can't trade.
+    decisions = sma_wants_long(
+        [candle.close for candle in sorted_candles],
+        config.fast_window,
+        config.slow_window,
+    )
+
     for index, candle in enumerate(sorted_candles):
         if candle.timestamp_ms <= state.last_timestamp_ms:
             continue
 
-        if index >= config.slow_window:
-            previous = sorted_candles[index - config.slow_window : index]
-            fast_ma = _mean([row.close for row in previous[-config.fast_window :]])
-            slow_ma = _mean([row.close for row in previous])
-            wants_long = fast_ma > slow_ma
-
+        wants_long = decisions[index]
+        if wants_long is not None:
             if wants_long and asset == 0 and cash > 0:
                 cash, asset, fill = paper_buy(candle, cash, asset, config)
                 fills.append(fill)
@@ -167,6 +172,3 @@ def _fill_from_dict(row: dict) -> PaperFill:
         asset_after=float(row["asset_after"]),
     )
 
-
-def _mean(values: list[float]) -> float:
-    return sum(values) / len(values)

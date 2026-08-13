@@ -54,6 +54,14 @@ class DemoOrderExecutor:
         self._limits = limits
         self._records = list(records or [])
         self._request_fn = request_fn
+        # client_order_id -> record, BLOCKED excluded (see _find_by_client_order_id).
+        # lesson_28 submits against a ledger that only ever grows; a linear scan
+        # per order would make every run slower than the last.
+        self._by_client_order_id = {
+            record.request.client_order_id: record
+            for record in self._records
+            if record.status != "BLOCKED"
+        }
 
     @property
     def records(self) -> list[DemoOrderRecord]:
@@ -261,20 +269,17 @@ class DemoOrderExecutor:
             message=message,
         )
         self._records.append(record)
+        if status != "BLOCKED":
+            self._by_client_order_id[request.client_order_id] = record
         return record
 
     def _find_by_client_order_id(self, client_order_id: str) -> DemoOrderRecord | None:
-        # A BLOCKED attempt never left this process, so retrying it is safe.
-        # Everything else consumes the id — including ERROR, because a failed
-        # request may still have reached the exchange, and a blind retry could
-        # fill twice. Clearing an ERROR means investigating, not resubmitting.
-        for record in self._records:
-            if (
-                record.request.client_order_id == client_order_id
-                and record.status != "BLOCKED"
-            ):
-                return record
-        return None
+        # A BLOCKED attempt never left this process, so retrying it is safe and
+        # BLOCKED records are kept out of the index. Everything else consumes
+        # the id — including ERROR, because a failed request may still have
+        # reached the exchange, and a blind retry could fill twice. Clearing an
+        # ERROR means investigating, not resubmitting.
+        return self._by_client_order_id.get(client_order_id)
 
 
 def quantize_to_lot(quantity: float, lot_size: float) -> float:

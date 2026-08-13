@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from okx_quant_lab.backtest import BacktestConfig, BacktestResult, run_sma_backtest
+from okx_quant_lab.backtest import (
+    BacktestConfig,
+    BacktestResult,
+    replay_sma_decisions,
+    run_sma_backtest,
+    sma_wants_long,
+)
 from okx_quant_lab.okx_public import Candle
 
 
@@ -68,6 +74,15 @@ def compare_position_sizes(
 ) -> list[PositionSizeResult]:
     rows: list[PositionSizeResult] = []
 
+    # The signal depends only on closes, never on sizing: compute the decision
+    # sequence once and replay the fills per trade fraction.
+    sorted_candles = sorted(candles, key=lambda candle: candle.timestamp_ms)
+    decisions = sma_wants_long(
+        [candle.close for candle in sorted_candles],
+        base_config.fast_window,
+        base_config.slow_window,
+    )
+
     for trade_fraction in trade_fractions:
         config = BacktestConfig(
             initial_cash=base_config.initial_cash,
@@ -77,7 +92,7 @@ def compare_position_sizes(
             slippage_bps=base_config.slippage_bps,
             trade_fraction=trade_fraction,
         )
-        result = run_sma_backtest(candles, config)
+        result = replay_sma_decisions(sorted_candles, decisions, config)
         report = build_risk_report(result, limits)
         rows.append(
             PositionSizeResult(

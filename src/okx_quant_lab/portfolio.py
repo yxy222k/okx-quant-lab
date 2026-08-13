@@ -53,10 +53,11 @@ def run_equal_weight_portfolio(
         legs.append(PortfolioLeg(inst_id, run_sma_backtest(candles, config)))
 
     common_timestamps = _common_timestamps(legs)
+    equity_maps = [_equity_by_timestamp(leg) for leg in legs]
     equity_curve = [
         PortfolioPoint(
             timestamp_ms=timestamp_ms,
-            equity=sum(_equity_by_timestamp(leg)[timestamp_ms] for leg in legs),
+            equity=sum(equity_map[timestamp_ms] for equity_map in equity_maps),
         )
         for timestamp_ms in common_timestamps
     ]
