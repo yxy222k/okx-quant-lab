@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import json
 from pathlib import Path
 
 from okx_quant_lab.okx_public import Candle
 from okx_quant_lab.paper import PaperConfig, PaperState
+from okx_quant_lab.state_store import load_ledger, save_ledger_atomic
 
 
 @dataclass(frozen=True)
@@ -123,13 +123,11 @@ class DryRunOrderManager:
 
 
 def save_order_ledger(path: Path, orders: list[DryRunOrder]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps([asdict(order) for order in orders], indent=2), encoding="utf-8")
+    save_ledger_atomic(path, [asdict(order) for order in orders])
 
 
 def load_order_ledger(path: Path) -> list[DryRunOrder]:
-    rows = json.loads(path.read_text(encoding="utf-8"))
-    return [_order_from_dict(row) for row in rows]
+    return [_order_from_dict(row) for row in load_ledger(path)]
 
 
 def _blocked_message(request: OrderRequest, limits: DryRunLimits) -> str | None:

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import json
 from pathlib import Path
 
 from okx_quant_lab.market_math import close_long, liquidation_equity, open_long
+from okx_quant_lab.state_store import load_versioned_json, save_json_atomic
 from okx_quant_lab.okx_public import Candle
 
 
@@ -92,12 +92,11 @@ def paper_equity(state: PaperState, mark_price: float, config: PaperConfig) -> f
 
 
 def save_paper_state(path: Path, state: PaperState) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(state), indent=2), encoding="utf-8")
+    save_json_atomic(path, asdict(state), schema_version=1)
 
 
 def load_paper_state(path: Path) -> PaperState:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = load_versioned_json(path, current_version=1)
     return PaperState(
         cash=float(data["cash"]),
         asset=float(data["asset"]),

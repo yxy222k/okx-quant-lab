@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-import json
 from pathlib import Path
 
 from okx_quant_lab.market_math import liquidation_equity, slipped_price
+from okx_quant_lab.state_store import load_versioned_json, save_json_atomic
 from okx_quant_lab.okx_public import Candle
 
 
@@ -154,12 +154,11 @@ def open_slot_count(state: GridPaperState) -> int:
 
 
 def save_grid_paper_state(path: Path, state: GridPaperState) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(state), indent=2), encoding="utf-8")
+    save_json_atomic(path, asdict(state), schema_version=1)
 
 
 def load_grid_paper_state(path: Path) -> GridPaperState:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = load_versioned_json(path, current_version=1)
     return GridPaperState(
         cash=float(data["cash"]),
         levels=[float(value) for value in data["levels"]],

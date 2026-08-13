@@ -8,6 +8,7 @@ from pathlib import Path
 from okx_quant_lab.demo_execution import DemoOrderExecutor, quantize_to_lot
 from okx_quant_lab.dry_run import OrderRequest
 from okx_quant_lab.okx_public import Candle, InstrumentSpec
+from okx_quant_lab.state_store import load_versioned_json, save_json_atomic
 
 
 @dataclass(frozen=True)
@@ -200,16 +201,11 @@ def open_slot_count(state: DemoGridState) -> int:
 
 
 def save_demo_grid_state(path: Path, state: DemoGridState) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Atomic write: a crash or a concurrent reader never sees a torn file, and
-    # the rename is the single commit point.
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(asdict(state), indent=2), encoding="utf-8")
-    tmp.replace(path)
+    save_json_atomic(path, asdict(state), schema_version=1)
 
 
 def load_demo_grid_state(path: Path) -> DemoGridState:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = load_versioned_json(path, current_version=1)
     return DemoGridState(
         cash=float(data["cash"]),
         levels=[float(value) for value in data["levels"]],

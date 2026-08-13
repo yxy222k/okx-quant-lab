@@ -2,13 +2,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import hashlib
-import json
 from pathlib import Path
 from typing import Callable
 
 from okx_quant_lab.dry_run import OrderRequest
 from okx_quant_lab.okx_demo_private import DemoCredentials, private_request
 from okx_quant_lab.safety import ExecutionIntent, evaluate_execution_safety
+from okx_quant_lab.state_store import load_ledger, save_ledger_atomic
 
 
 @dataclass(frozen=True)
@@ -219,16 +219,11 @@ def quantize_to_lot(quantity: float, lot_size: float) -> float:
 
 
 def save_demo_order_ledger(path: Path, records: list[DemoOrderRecord]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps([asdict(record) for record in records], indent=2),
-        encoding="utf-8",
-    )
+    save_ledger_atomic(path, [asdict(record) for record in records])
 
 
 def load_demo_order_ledger(path: Path) -> list[DemoOrderRecord]:
-    rows = json.loads(path.read_text(encoding="utf-8"))
-    return [_record_from_dict(row) for row in rows]
+    return [_record_from_dict(row) for row in load_ledger(path)]
 
 
 def _exchange_client_order_id(client_order_id: str) -> str:

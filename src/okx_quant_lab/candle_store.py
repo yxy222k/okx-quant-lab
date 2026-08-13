@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import csv
+import io
 from pathlib import Path
 
 from okx_quant_lab.okx_public import Candle
+from okx_quant_lab.state_store import save_text_atomic
 
 
 FIELDNAMES = [
@@ -19,9 +21,7 @@ FIELDNAMES = [
 
 
 def save_candles_csv(path: Path, candles: list[Candle]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with path.open("w", newline="", encoding="utf-8") as file:
+    with io.StringIO(newline="") as file:
         writer = csv.DictWriter(file, fieldnames=FIELDNAMES)
         writer.writeheader()
         for candle in sorted(candles, key=lambda row: row.timestamp_ms):
@@ -37,6 +37,7 @@ def save_candles_csv(path: Path, candles: list[Candle]) -> None:
                     "confirmed": "1" if candle.confirmed else "0",
                 }
             )
+        save_text_atomic(path, file.getvalue())
 
 
 def load_candles_csv(path: Path) -> list[Candle]:
