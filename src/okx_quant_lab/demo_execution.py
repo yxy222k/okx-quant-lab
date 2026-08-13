@@ -91,9 +91,16 @@ class DemoOrderExecutor:
 
         try:
             return self._place_and_confirm(request)
-        except RuntimeError as error:
-            # Exchange/API failures still belong in the audit trail.
-            return self._record(request, "ERROR", message=str(error))
+        except Exception as error:
+            # Once the request may have reached the exchange, EVERY failure must
+            # land in the ledger and consume the client_order_id — a blind retry
+            # could fill twice. RuntimeError covers wrapped API errors, OSError
+            # covers network failures (TimeoutError/URLError), ValueError covers
+            # non-JSON gateway responses, and the rest covers malformed payloads.
+            # A bare TimeoutError() has an empty str(), so include the type name.
+            return self._record(
+                request, "ERROR", message=f"{type(error).__name__}: {error}"
+            )
 
     def _place_and_confirm(self, request: OrderRequest) -> DemoOrderRecord:
         exchange_client_order_id = _exchange_client_order_id(request.client_order_id)

@@ -160,6 +160,54 @@ class DemoExecutorTest(unittest.TestCase):
         retried = executor.submit(_request(), confirmed=True)
         self.assertEqual(retried.status, "DUPLICATE")
 
+    def test_network_failures_are_recorded_and_consume_the_id(self) -> None:
+        # TimeoutError/URLError are OSError subclasses that private_request does
+        # NOT wrap into RuntimeError; they must still land in the ledger.
+        from urllib.error import HTTPError
+
+        failures = [
+            TimeoutError(),  # bare: str() is empty, message needs the type name
+            HTTPError("https://okx.com", 502, "bad gateway", None, None),
+            ValueError("Expecting value: line 1 column 1 (char 0)"),  # non-JSON body
+        ]
+        for index, failure in enumerate(failures):
+            with self.subTest(failure=type(failure).__name__):
+                def failing(credentials, method, path, body=None, _error=failure):
+                    raise _error
+
+                executor = DemoOrderExecutor(
+                    CREDENTIALS, DemoExecutionLimits(), request_fn=failing
+                )
+                request = _request(client_order_id=f"net:{index}")
+
+                record = executor.submit(request, confirmed=True)
+                self.assertEqual(record.status, "ERROR")
+                self.assertIn(type(failure).__name__, record.message)
+
+                retried = executor.submit(request, confirmed=True)
+                self.assertEqual(retried.status, "DUPLICATE")
+                self.assertEqual(len(executor.records), 1)
+
+    def test_error_record_survives_ledger_roundtrip_and_still_blocks_retry(self) -> None:
+        def failing(credentials, method, path, body=None):
+            raise TimeoutError()
+
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=failing)
+        executor.submit(_request(), confirmed=True)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ledger.json"
+            save_demo_order_ledger(path, executor.records)
+            reloaded = DemoOrderExecutor(
+                CREDENTIALS,
+                DemoExecutionLimits(),
+                records=load_demo_order_ledger(path),
+                request_fn=failing,
+            )
+
+        retried = reloaded.submit(_request(), confirmed=True)
+        self.assertEqual(retried.status, "DUPLICATE")
+
     def test_exchange_rejection_is_recorded(self) -> None:
         def rejecting(credentials, method, path, body=None):
             return {"code": "0", "data": [{"sCode": "51000", "sMsg": "bad size"}]}
