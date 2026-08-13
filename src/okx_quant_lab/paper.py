@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 
+from okx_quant_lab.market_math import close_long, liquidation_equity, open_long
 from okx_quant_lab.okx_public import Candle
 
 
@@ -85,8 +86,9 @@ def run_paper_session(
 
 
 def paper_equity(state: PaperState, mark_price: float, config: PaperConfig) -> float:
-    exit_price = _slipped_price(mark_price, "SELL", config.slippage_bps)
-    return state.cash + state.asset * exit_price * (1 - config.fee_rate)
+    return liquidation_equity(
+        state.cash, state.asset, mark_price, config.fee_rate, config.slippage_bps
+    )
 
 
 def save_paper_state(path: Path, state: PaperState) -> None:
@@ -110,23 +112,21 @@ def _paper_buy(
     asset: float,
     config: PaperConfig,
 ) -> tuple[float, float, PaperFill]:
-    fill_price = _slipped_price(candle.open, "BUY", config.slippage_bps)
-    spend = cash * config.trade_fraction
-    fee = spend * config.fee_rate
-    quantity = (spend - fee) / fill_price
-    cash_after = cash - spend
-    asset_after = asset + quantity
+    fill = open_long(
+        candle.open, cash, config.fee_rate, config.slippage_bps, config.trade_fraction
+    )
+    asset_after = asset + fill.quantity
 
     return (
-        cash_after,
+        fill.cash_after,
         asset_after,
         PaperFill(
             timestamp_ms=candle.timestamp_ms,
             side="BUY",
-            price=fill_price,
-            quantity=quantity,
-            fee=fee,
-            cash_after=cash_after,
+            price=fill.fill_price,
+            quantity=fill.quantity,
+            fee=fill.fee,
+            cash_after=fill.cash_after,
             asset_after=asset_after,
         ),
     )
@@ -138,23 +138,19 @@ def _paper_sell(
     asset: float,
     config: PaperConfig,
 ) -> tuple[float, float, PaperFill]:
-    fill_price = _slipped_price(candle.open, "SELL", config.slippage_bps)
-    gross = asset * fill_price
-    fee = gross * config.fee_rate
-    cash_after = cash + gross - fee
-    asset_after = 0.0
+    fill = close_long(candle.open, cash, asset, config.fee_rate, config.slippage_bps)
 
     return (
-        cash_after,
-        asset_after,
+        fill.cash_after,
+        0.0,
         PaperFill(
             timestamp_ms=candle.timestamp_ms,
             side="SELL",
-            price=fill_price,
-            quantity=asset,
-            fee=fee,
-            cash_after=cash_after,
-            asset_after=asset_after,
+            price=fill.fill_price,
+            quantity=fill.quantity,
+            fee=fill.fee,
+            cash_after=fill.cash_after,
+            asset_after=0.0,
         ),
     )
 
@@ -173,12 +169,3 @@ def _fill_from_dict(row: dict) -> PaperFill:
 
 def _mean(values: list[float]) -> float:
     return sum(values) / len(values)
-
-
-def _slipped_price(price: float, side: str, slippage_bps: float) -> float:
-    slippage = slippage_bps / 10_000
-    if side == "BUY":
-        return price * (1 + slippage)
-    if side == "SELL":
-        return price * (1 - slippage)
-    raise ValueError(f"unknown side: {side}")

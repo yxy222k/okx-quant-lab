@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 
+from okx_quant_lab.market_math import liquidation_equity, slipped_price
 from okx_quant_lab.okx_public import Candle
 
 
@@ -86,7 +87,7 @@ def run_grid_paper_session(
         # Sells first: a slot bought in this candle cannot also sell in it.
         for index in range(config.grid_count):
             if holdings[index] > 0 and candle.high >= levels[index + 1]:
-                fill_price = _slipped_price(levels[index + 1], "SELL", config.slippage_bps)
+                fill_price = slipped_price(levels[index + 1], "SELL", config.slippage_bps)
                 quantity = holdings[index]
                 gross = quantity * fill_price
                 fee = gross * config.fee_rate
@@ -107,7 +108,7 @@ def run_grid_paper_session(
 
         for index in range(config.grid_count):
             if armed[index] and holdings[index] == 0 and candle.low <= levels[index]:
-                fill_price = _slipped_price(levels[index], "BUY", config.slippage_bps)
+                fill_price = slipped_price(levels[index], "BUY", config.slippage_bps)
                 fee = slot_cash * config.fee_rate
                 quantity = (slot_cash - fee) / fill_price
                 cash -= slot_cash
@@ -143,9 +144,9 @@ def run_grid_paper_session(
 
 
 def grid_paper_equity(state: GridPaperState, mark_price: float, config: GridPaperConfig) -> float:
-    exit_price = _slipped_price(mark_price, "SELL", config.slippage_bps)
-    asset = sum(state.holdings)
-    return state.cash + asset * exit_price * (1 - config.fee_rate)
+    return liquidation_equity(
+        state.cash, sum(state.holdings), mark_price, config.fee_rate, config.slippage_bps
+    )
 
 
 def open_slot_count(state: GridPaperState) -> int:
@@ -194,11 +195,3 @@ def _fill_from_dict(row: dict) -> GridPaperFill:
         cash_after=float(row["cash_after"]),
     )
 
-
-def _slipped_price(price: float, side: str, slippage_bps: float) -> float:
-    slippage = slippage_bps / 10_000
-    if side == "BUY":
-        return price * (1 + slippage)
-    if side == "SELL":
-        return price * (1 - slippage)
-    raise ValueError(f"unknown side: {side}")

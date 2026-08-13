@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from okx_quant_lab.indicators import relative_strength_index
+from okx_quant_lab.market_math import (
+    close_long,
+    liquidation_equity,
+    max_drawdown_pct,
+    open_long,
+)
 from okx_quant_lab.okx_public import Candle
 
 
@@ -69,7 +75,7 @@ def run_rsi_mean_reversion_backtest(
         trades=trades,
         final_equity=final_equity,
         return_pct=(final_equity / config.initial_cash - 1) * 100,
-        max_drawdown_pct=_max_drawdown_pct(equity_values),
+        max_drawdown_pct=max_drawdown_pct(equity_values),
     )
 
 
@@ -97,14 +103,13 @@ def _buy(
     rsi: float,
     config: RsiBacktestConfig,
 ) -> tuple[float, float, RsiTrade]:
-    fill_price = _slipped_price(candle.open, "BUY", config.slippage_bps)
-    spend = cash * config.trade_fraction
-    fee = spend * config.fee_rate
-    quantity = (spend - fee) / fill_price
+    fill = open_long(
+        candle.open, cash, config.fee_rate, config.slippage_bps, config.trade_fraction
+    )
     return (
-        cash - spend,
-        asset + quantity,
-        RsiTrade(candle.timestamp_ms, "BUY", fill_price, quantity, fee, rsi),
+        fill.cash_after,
+        asset + fill.quantity,
+        RsiTrade(candle.timestamp_ms, "BUY", fill.fill_price, fill.quantity, fill.fee, rsi),
     )
 
 
@@ -115,35 +120,13 @@ def _sell(
     rsi: float,
     config: RsiBacktestConfig,
 ) -> tuple[float, float, RsiTrade]:
-    fill_price = _slipped_price(candle.open, "SELL", config.slippage_bps)
-    gross = asset * fill_price
-    fee = gross * config.fee_rate
+    fill = close_long(candle.open, cash, asset, config.fee_rate, config.slippage_bps)
     return (
-        cash + gross - fee,
+        fill.cash_after,
         0.0,
-        RsiTrade(candle.timestamp_ms, "SELL", fill_price, asset, fee, rsi),
+        RsiTrade(candle.timestamp_ms, "SELL", fill.fill_price, fill.quantity, fill.fee, rsi),
     )
 
 
 def _equity(cash: float, asset: float, price: float, config: RsiBacktestConfig) -> float:
-    exit_price = _slipped_price(price, "SELL", config.slippage_bps)
-    return cash + asset * exit_price * (1 - config.fee_rate)
-
-
-def _max_drawdown_pct(equity_values: list[float]) -> float:
-    peak = equity_values[0]
-    max_drawdown = 0.0
-    for equity in equity_values:
-        peak = max(peak, equity)
-        drawdown = (equity / peak - 1) * 100
-        max_drawdown = min(max_drawdown, drawdown)
-    return max_drawdown
-
-
-def _slipped_price(price: float, side: str, slippage_bps: float) -> float:
-    slippage = slippage_bps / 10_000
-    if side == "BUY":
-        return price * (1 + slippage)
-    if side == "SELL":
-        return price * (1 - slippage)
-    raise ValueError(f"unknown side: {side}")
+    return liquidation_equity(cash, asset, price, config.fee_rate, config.slippage_bps)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from okx_quant_lab.market_math import max_drawdown_pct
 from okx_quant_lab.backtest import BacktestConfig, BacktestResult, run_sma_backtest
 from okx_quant_lab.okx_public import Candle
 
@@ -68,7 +69,7 @@ def run_equal_weight_portfolio(
         equity_curve=equity_curve,
         final_equity=final_equity,
         return_pct=(final_equity / total_cash - 1) * 100,
-        max_drawdown_pct=_max_drawdown_pct([point.equity for point in equity_curve]),
+        max_drawdown_pct=max_drawdown_pct([point.equity for point in equity_curve]),
     )
 
 
@@ -87,12 +88,3 @@ def _equity_by_timestamp(leg: PortfolioLeg) -> dict[int, float]:
         for point in leg.result.equity_curve
     }
 
-
-def _max_drawdown_pct(equity_values: list[float]) -> float:
-    peak = equity_values[0]
-    max_drawdown = 0.0
-    for equity in equity_values:
-        peak = max(peak, equity)
-        drawdown = (equity / peak - 1) * 100
-        max_drawdown = min(max_drawdown, drawdown)
-    return max_drawdown

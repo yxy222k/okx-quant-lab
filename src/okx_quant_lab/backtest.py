@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from okx_quant_lab.market_math import (
+    close_long,
+    liquidation_equity,
+    max_drawdown_pct,
+    open_long,
+    slipped_price,
+)
 from okx_quant_lab.okx_public import Candle
 
 
@@ -85,7 +92,9 @@ def run_sma_backtest(candles: list[Candle], config: BacktestConfig) -> BacktestR
         if index >= config.slow_window:
             slow_sum -= closes[index - config.slow_window]
 
-        equity = _liquidation_equity(cash, asset, candle.close, config)
+        equity = liquidation_equity(
+            cash, asset, candle.close, config.fee_rate, config.slippage_bps
+        )
         equity_curve.append(
             EquityPoint(
                 timestamp_ms=candle.timestamp_ms,
@@ -99,8 +108,6 @@ def run_sma_backtest(candles: list[Candle], config: BacktestConfig) -> BacktestR
     final_equity = equity_curve[-1].equity
     return_pct = _return_pct(config.initial_cash, final_equity)
     buy_and_hold_return_pct = _buy_and_hold_return_pct(candles, config)
-    max_drawdown_pct = _max_drawdown_pct([point.equity for point in equity_curve])
-
     return BacktestResult(
         config=config,
         trades=trades,
@@ -108,7 +115,7 @@ def run_sma_backtest(candles: list[Candle], config: BacktestConfig) -> BacktestR
         final_equity=final_equity,
         return_pct=return_pct,
         buy_and_hold_return_pct=buy_and_hold_return_pct,
-        max_drawdown_pct=max_drawdown_pct,
+        max_drawdown_pct=max_drawdown_pct([point.equity for point in equity_curve]),
     )
 
 
@@ -135,23 +142,21 @@ def _buy(
     asset: float,
     config: BacktestConfig,
 ) -> tuple[float, float, Trade]:
-    fill_price = _slipped_price(candle.open, "BUY", config.slippage_bps)
-    spend = cash * config.trade_fraction
-    fee = spend * config.fee_rate
-    quantity = (spend - fee) / fill_price
-    cash_after = cash - spend
-    asset_after = asset + quantity
+    fill = open_long(
+        candle.open, cash, config.fee_rate, config.slippage_bps, config.trade_fraction
+    )
+    asset_after = asset + fill.quantity
 
     return (
-        cash_after,
+        fill.cash_after,
         asset_after,
         Trade(
             timestamp_ms=candle.timestamp_ms,
             side="BUY",
-            price=fill_price,
-            quantity=quantity,
-            fee=fee,
-            cash_after=cash_after,
+            price=fill.fill_price,
+            quantity=fill.quantity,
+            fee=fill.fee,
+            cash_after=fill.cash_after,
             asset_after=asset_after,
         ),
     )
@@ -163,42 +168,28 @@ def _sell(
     asset: float,
     config: BacktestConfig,
 ) -> tuple[float, float, Trade]:
-    fill_price = _slipped_price(candle.open, "SELL", config.slippage_bps)
-    gross = asset * fill_price
-    fee = gross * config.fee_rate
-    cash_after = cash + gross - fee
-    asset_after = 0.0
+    fill = close_long(candle.open, cash, asset, config.fee_rate, config.slippage_bps)
 
     return (
-        cash_after,
-        asset_after,
+        fill.cash_after,
+        0.0,
         Trade(
             timestamp_ms=candle.timestamp_ms,
             side="SELL",
-            price=fill_price,
-            quantity=asset,
-            fee=fee,
-            cash_after=cash_after,
-            asset_after=asset_after,
+            price=fill.fill_price,
+            quantity=fill.quantity,
+            fee=fill.fee,
+            cash_after=fill.cash_after,
+            asset_after=0.0,
         ),
     )
-
-
-def _liquidation_equity(
-    cash: float,
-    asset: float,
-    price: float,
-    config: BacktestConfig,
-) -> float:
-    sell_price = _slipped_price(price, "SELL", config.slippage_bps)
-    return cash + asset * sell_price * (1 - config.fee_rate)
 
 
 def _buy_and_hold_return_pct(candles: list[Candle], config: BacktestConfig) -> float:
     first = candles[0]
     last = candles[-1]
-    buy_price = _slipped_price(first.open, "BUY", config.slippage_bps)
-    sell_price = _slipped_price(last.close, "SELL", config.slippage_bps)
+    buy_price = slipped_price(first.open, "BUY", config.slippage_bps)
+    sell_price = slipped_price(last.close, "SELL", config.slippage_bps)
     asset = config.initial_cash * (1 - config.fee_rate) / buy_price
     final_equity = asset * sell_price * (1 - config.fee_rate)
     return _return_pct(config.initial_cash, final_equity)
@@ -206,24 +197,3 @@ def _buy_and_hold_return_pct(candles: list[Candle], config: BacktestConfig) -> f
 
 def _return_pct(initial_cash: float, final_equity: float) -> float:
     return ((final_equity / initial_cash) - 1) * 100
-
-
-def _max_drawdown_pct(equity_values: list[float]) -> float:
-    peak = equity_values[0]
-    max_drawdown = 0.0
-
-    for equity in equity_values:
-        peak = max(peak, equity)
-        drawdown = (equity / peak - 1) * 100
-        max_drawdown = min(max_drawdown, drawdown)
-
-    return max_drawdown
-
-
-def _slipped_price(price: float, side: str, slippage_bps: float) -> float:
-    slippage = slippage_bps / 10_000
-    if side == "BUY":
-        return price * (1 + slippage)
-    if side == "SELL":
-        return price * (1 - slippage)
-    raise ValueError(f"unknown side: {side}")

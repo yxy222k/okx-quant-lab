@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from okx_quant_lab.market_math import liquidation_equity, max_drawdown_pct, slipped_price
 from okx_quant_lab.okx_public import Candle
 
 
@@ -90,7 +91,7 @@ def run_grid_backtest(candles: list[Candle], config: GridBacktestConfig) -> Grid
         # because the intra-candle price path is unknown.
         for index in range(config.grid_count):
             if holdings[index] > 0 and candle.high >= levels[index + 1]:
-                fill_price = _slipped_price(levels[index + 1], "SELL", config.slippage_bps)
+                fill_price = slipped_price(levels[index + 1], "SELL", config.slippage_bps)
                 quantity = holdings[index]
                 gross = quantity * fill_price
                 fee = gross * config.fee_rate
@@ -116,7 +117,7 @@ def run_grid_backtest(candles: list[Candle], config: GridBacktestConfig) -> Grid
                 and candle.low <= levels[index]
                 and cash >= slot_cash
             ):
-                fill_price = _slipped_price(levels[index], "BUY", config.slippage_bps)
+                fill_price = slipped_price(levels[index], "BUY", config.slippage_bps)
                 fee = slot_cash * config.fee_rate
                 quantity = (slot_cash - fee) / fill_price
                 cash -= slot_cash
@@ -144,7 +145,7 @@ def run_grid_backtest(candles: list[Candle], config: GridBacktestConfig) -> Grid
         equity_values.append(_mark_to_market(cash, holdings, candle.close, config))
 
     final_equity = equity_values[-1]
-    last_exit_price = _slipped_price(sorted_candles[-1].close, "SELL", config.slippage_bps)
+    last_exit_price = slipped_price(sorted_candles[-1].close, "SELL", config.slippage_bps)
     unrealized_pnl = sum(
         quantity * last_exit_price * (1 - config.fee_rate) - slot_cash
         for quantity in holdings
@@ -156,7 +157,7 @@ def run_grid_backtest(candles: list[Candle], config: GridBacktestConfig) -> Grid
         fills=fills,
         final_equity=final_equity,
         return_pct=(final_equity / config.initial_cash - 1) * 100,
-        max_drawdown_pct=_max_drawdown_pct(equity_values),
+        max_drawdown_pct=max_drawdown_pct(equity_values),
         round_trips=round_trips,
         realized_profit=realized_profit,
         open_slots=sum(1 for quantity in holdings if quantity > 0),
@@ -194,9 +195,7 @@ def _mark_to_market(
     price: float,
     config: GridBacktestConfig,
 ) -> float:
-    asset = sum(holdings)
-    exit_price = _slipped_price(price, "SELL", config.slippage_bps)
-    return cash + asset * exit_price * (1 - config.fee_rate)
+    return liquidation_equity(cash, sum(holdings), price, config.fee_rate, config.slippage_bps)
 
 
 def _buy_and_hold_return_pct(candles: list[Candle], config: GridBacktestConfig) -> float:
@@ -204,21 +203,3 @@ def _buy_and_hold_return_pct(candles: list[Candle], config: GridBacktestConfig) 
     final_equity = asset * candles[-1].close * (1 - config.fee_rate)
     return (final_equity / config.initial_cash - 1) * 100
 
-
-def _max_drawdown_pct(equity_values: list[float]) -> float:
-    peak = equity_values[0]
-    max_drawdown = 0.0
-    for equity in equity_values:
-        peak = max(peak, equity)
-        drawdown = (equity / peak - 1) * 100
-        max_drawdown = min(max_drawdown, drawdown)
-    return max_drawdown
-
-
-def _slipped_price(price: float, side: str, slippage_bps: float) -> float:
-    slippage = slippage_bps / 10_000
-    if side == "BUY":
-        return price * (1 + slippage)
-    if side == "SELL":
-        return price * (1 - slippage)
-    raise ValueError(f"unknown side: {side}")
