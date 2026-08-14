@@ -349,6 +349,58 @@ class DemoExecutorTest(unittest.TestCase):
         self.assertEqual(record.status, "ERROR")
         self.assertEqual(posts, ["POST"])  # no retry, no probe
 
+    def test_terminal_order_states_are_not_reported_as_submitted(self) -> None:
+        # OKX demo cancels market orders that slip past its price-protection
+        # band (thin simulated book); those are terminal, not "still working".
+        cases = [
+            ("filled", "0.1", "FILLED"),
+            ("canceled", "0", "CANCELED"),
+            ("mmp_canceled", "0", "CANCELED"),
+            ("canceled", "0.04", "PARTIAL"),
+            ("live", "0", "SUBMITTED"),
+            ("partially_filled", "0.04", "SUBMITTED"),
+        ]
+        for index, (state, filled, expected) in enumerate(cases):
+            with self.subTest(state=state, filled=filled):
+                def request_fn(credentials, method, path, body=None, _s=state, _f=filled):
+                    if method == "POST":
+                        return {"code": "0", "data": [{"sCode": "0", "ordId": "ord-x"}]}
+                    return {
+                        "code": "0",
+                        "data": [{"ordId": "ord-x", "state": _s, "avgPx": "100",
+                                  "accFillSz": _f, "fee": "-0.01", "feeCcy": "USDT"}],
+                    }
+
+                executor = DemoOrderExecutor(
+                    CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn
+                )
+                request = _request(client_order_id=f"state:{index}")
+                record = executor.submit(request, confirmed=True)
+
+                self.assertEqual(record.status, expected)
+                self.assertIn(state, record.message)
+                # Every one of these reached the exchange, so the id is spent.
+                self.assertEqual(
+                    executor.submit(request, confirmed=True).status, "DUPLICATE"
+                )
+
+    def test_partial_cancel_message_flags_manual_reconciliation(self) -> None:
+        def request_fn(credentials, method, path, body=None):
+            if method == "POST":
+                return {"code": "0", "data": [{"sCode": "0", "ordId": "ord-p"}]}
+            return {
+                "code": "0",
+                "data": [{"ordId": "ord-p", "state": "canceled", "avgPx": "100",
+                          "accFillSz": "0.04", "fee": "-0.01", "feeCcy": "USDT"}],
+            }
+
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn)
+        record = executor.submit(_request(), confirmed=True)
+
+        self.assertEqual(record.status, "PARTIAL")
+        self.assertAlmostEqual(record.fill_quantity, 0.04)
+        self.assertIn("drifted", record.message)
+
     def test_exchange_rejection_is_recorded(self) -> None:
         def rejecting(credentials, method, path, body=None):
             return {"code": "0", "data": [{"sCode": "51000", "sMsg": "bad size"}]}

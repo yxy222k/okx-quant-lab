@@ -34,7 +34,10 @@ class DemoExecutionLimits:
 @dataclass(frozen=True)
 class DemoOrderRecord:
     request: OrderRequest
-    status: str  # BLOCKED, REJECTED, SUBMITTED, FILLED, DUPLICATE
+    # BLOCKED, REJECTED, SUBMITTED, FILLED, CANCELED, PARTIAL, ERROR, DUPLICATE.
+    # SUBMITTED means the order is still working; CANCELED and PARTIAL are
+    # terminal (see _order_status).
+    status: str
     exchange_order_id: str
     exchange_client_order_id: str
     fill_price: float
@@ -159,16 +162,18 @@ class DemoOrderExecutor:
         order_id = result["ordId"]
         details = self._fetch_order_details(request.inst_id, order_id)
         state = details.get("state", "")
+        fill_quantity = float(details.get("accFillSz") or 0)
+        status, note = _order_status(state, fill_quantity)
         return self._record(
             request,
-            "FILLED" if state == "filled" else "SUBMITTED",
+            status,
             exchange_order_id=order_id,
             exchange_client_order_id=exchange_client_order_id,
             fill_price=float(details.get("avgPx") or 0),
-            fill_quantity=float(details.get("accFillSz") or 0),
+            fill_quantity=fill_quantity,
             fee=float(details.get("fee") or 0),
             fee_currency=details.get("feeCcy", ""),
-            message=f"demo order state={state or 'unknown'}",
+            message=f"demo order state={state or 'unknown'}{note}",
         )
 
     def _post_order_idempotent(self, inst_id: str, body: dict, attempts: int = 3) -> dict:
@@ -352,6 +357,29 @@ def save_demo_order_ledger(path: Path, records: list[DemoOrderRecord]) -> None:
 
 def load_demo_order_ledger(path: Path) -> list[DemoOrderRecord]:
     return [_record_from_dict(row) for row in load_ledger(path)]
+
+
+def _order_status(state: str, fill_quantity: float) -> tuple[str, str]:
+    """Map an OKX order state to a ledger status, plus a message suffix.
+
+    SUBMITTED must mean "still working", so terminal states get their own
+    labels: on the demo environment OKX cancels market orders whose estimated
+    fill price slips past its protection band (thin simulated book), and those
+    used to land in the ledger as SUBMITTED — indistinguishable from a live
+    order. A cancel that filled part of the order is worse than either: it is
+    terminal AND moved the position, but the grid only books whole FILLs, so
+    the local book has drifted and needs a human.
+    """
+    if state == "filled":
+        return "FILLED", ""
+    if state in {"canceled", "mmp_canceled"}:
+        if fill_quantity > 0:
+            return "PARTIAL", (
+                f"; partially filled {fill_quantity:.8f} then canceled — "
+                "local book has drifted, reconcile manually"
+            )
+        return "CANCELED", "; nothing filled, slot retries on the next trigger"
+    return "SUBMITTED", ""
 
 
 def _exchange_client_order_id(client_order_id: str) -> str:

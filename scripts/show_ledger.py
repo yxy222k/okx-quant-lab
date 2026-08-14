@@ -41,11 +41,15 @@ def main() -> int:
                 f"  {_seen_at(request.created_at_ms)}  "
                 f"{request.side:<4} {request.inst_id:<9} {record.status:<9}"
             )
-            if record.status == "FILLED":
+            if record.fill_quantity:
+                # PARTIAL moved the position too, so it needs the fill columns
+                # just as much as FILLED — it is the case a human must chase.
                 line += (
                     f" fill={record.fill_price:<10.4f} qty={record.fill_quantity:<11.6f} "
                     f"fee={record.fee:.6f} {record.fee_currency}"
                 )
+                if record.status != "FILLED":
+                    line += f" {record.message}"
             else:
                 line += f" {record.message}"
             print(line)
