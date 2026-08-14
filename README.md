@@ -454,6 +454,14 @@ because they are modelling nuances or live-safety definitions rather than bugs:
   book has drifted and needs manual reconciliation. Ledger rows written before
   2026-08-14 show these as `SUBMITTED` — the audit trail was left intact, and
   their `message` field carries the real `state=canceled`.
+- **The paper equity carries one gap-era artefact.** The SOL/ETH 1H scan files
+  were missing 136 bars (2026-06-24..06-30) until 2026-08-14. Rolling windows
+  that crossed the hole spliced prices from either side, so paper decisions
+  taken in early July ran on that spliced series, and the resulting state is
+  what today's equity continues from. The files are contiguous again
+  (`candle_gaps` now reports any recurrence), and the state was deliberately
+  *not* replayed — rewriting live state would break continuity with everything
+  already reported.
 - **An order query is not proof of absence.** `/api/v5/trade/order` answers
   `51603 "Order does not exist"` for orders that were genuinely placed and have
   since gone terminal (use `/api/v5/trade/orders-history` for those). This is
