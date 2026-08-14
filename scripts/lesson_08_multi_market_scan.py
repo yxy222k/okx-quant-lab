@@ -70,7 +70,11 @@ def main() -> int:
 
 def _load_or_fetch(inst_id: str, bar: str, target_count: int, path: Path):
     # Incremental refresh every run: a full cache no longer means a stale scan.
-    return refresh_candles(path, inst_id, bar=bar, target_count=target_count)[-target_count:]
+    # On-demand research, so it also repairs holes left inside the cache —
+    # a gapped series would silently splice unrelated prices into one window.
+    return refresh_candles(
+        path, inst_id, bar=bar, target_count=target_count, repair_gaps=True
+    )[-target_count:]
 
 
 if __name__ == "__main__":

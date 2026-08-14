@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 from pathlib import Path
+import sys
 from typing import Callable
 
 from okx_quant_lab.okx_public import Candle, fetch_candles, fetch_historical_candles
@@ -49,6 +50,28 @@ def load_candles_csv(path: Path) -> list[Candle]:
     return sorted(candles, key=lambda candle: candle.timestamp_ms)
 
 
+def candle_gaps(candles: list[Candle]) -> list[tuple[int, int, int]]:
+    """Holes in an ascending candle series as (start_ms, end_ms, missing_bars).
+
+    The bar interval is inferred as the smallest step present, so this works
+    without knowing the timeframe. Positional strategies (every rolling window
+    in this project) read a gapped series as if it were contiguous, which
+    silently splices prices from either side of the hole into one window —
+    hence a detector rather than a comment.
+    """
+    if len(candles) < 3:
+        return []
+    steps = [b.timestamp_ms - a.timestamp_ms for a, b in zip(candles, candles[1:])]
+    bar_ms = min(steps)
+    if bar_ms <= 0:
+        return []
+    return [
+        (a.timestamp_ms, b.timestamp_ms, step // bar_ms - 1)
+        for a, b, step in zip(candles, candles[1:], steps)
+        if step > bar_ms
+    ]
+
+
 def refresh_candles(
     path: Path,
     inst_id: str,
@@ -56,6 +79,7 @@ def refresh_candles(
     target_count: int = 300,
     latest_limit: int = 200,
     retention: int | None = None,
+    repair_gaps: bool = False,
     fetch_latest: Callable[..., list[Candle]] | None = None,
     fetch_history: Callable[..., list[Candle]] | None = None,
 ) -> list[Candle]:
@@ -64,9 +88,15 @@ def refresh_candles(
     Always fetches the newest `latest_limit` candles and merges them into the
     cached file — an existing cache can never go stale (the lesson_08 trap of
     "row count is sufficient, skip the network"). If the merged set is still
-    shorter than target_count, it backfills from paged history. `retention`
-    trims the saved file to a rolling window; None keeps everything.
-    Returns the merged (trimmed) candles, oldest first.
+    shorter than target_count, it backfills from paged history, and it always
+    bridges the hole a stale cache leaves between its newest candle and the
+    fresh fetch. `retention` trims the saved file to a rolling window.
+
+    `repair_gaps` additionally backfills holes that already existed inside the
+    cache. It is opt-in because a hole the exchange cannot fill (a listing gap,
+    an outage) would otherwise be re-fetched on every scheduled run; on-demand
+    research scripts pass it, the every-15-minutes loops do not. Gaps that
+    survive are reported on stderr rather than left silent.
     """
     fetch_latest = fetch_latest or fetch_candles
     fetch_history = fetch_history or fetch_historical_candles
@@ -74,11 +104,17 @@ def refresh_candles(
     existing = load_candles_csv(path) if path.exists() else []
     try:
         latest = fetch_latest(inst_id, bar=bar, limit=latest_limit)
-    except (RuntimeError, OSError):
+    except (RuntimeError, OSError) as error:
         if not existing:
             raise
-        # Offline fallback: research scripts used to run from a warm cache;
-        # a network hiccup should degrade to stale data, not a traceback.
+        # Offline fallback: research scripts used to run from a warm cache, so
+        # a network hiccup should degrade to stale data rather than a
+        # traceback — but say so, or a persistent outage looks like success.
+        print(
+            f"warning: {inst_id} {bar} refresh failed "
+            f"({type(error).__name__}: {error}); serving {len(existing)} cached candles",
+            file=sys.stderr,
+        )
         return existing[-retention:] if retention is not None else existing
     candles = merge_candles(existing, latest)
 
@@ -93,8 +129,27 @@ def refresh_candles(
         history = fetch_history(inst_id, bar=bar, target_count=bridge_target)
         candles = merge_candles(history, candles)
 
+    gaps = candle_gaps(candles)
+    if gaps and repair_gaps:
+        # One paged fetch back to the oldest hole fills every hole at once.
+        bar_ms = min(b.timestamp_ms - a.timestamp_ms for a, b in zip(candles, candles[1:]))
+        span = int((candles[-1].timestamp_ms - gaps[0][0]) // bar_ms + 2)
+        history = fetch_history(inst_id, bar=bar, target_count=span)
+        candles = merge_candles(history, candles)
+        gaps = candle_gaps(candles)
+
     if retention is not None:
         candles = candles[-retention:]
+        gaps = candle_gaps(candles)
+
+    if gaps:
+        missing = sum(bars for _, _, bars in gaps)
+        print(
+            f"warning: {inst_id} {bar} has {len(gaps)} gap(s) totalling {missing} "
+            f"missing bars; rolling windows spanning them splice unrelated prices"
+            + ("" if repair_gaps else " (pass repair_gaps=True to backfill)"),
+            file=sys.stderr,
+        )
 
     save_candles_csv(path, candles)
     return candles

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 from pathlib import Path
 import sys
 import tempfile
@@ -11,6 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from okx_quant_lab.candle_store import (
+    candle_gaps,
     load_candles_csv,
     merge_candles,
     refresh_candles,
@@ -105,6 +108,78 @@ class RefreshCandlesTest(unittest.TestCase):
             )
 
             self.assertEqual([c.timestamp_ms for c in merged], [1, 2, 3, 4, 5])
+
+    def test_candle_gaps_reports_holes_and_bar_counts(self) -> None:
+        contiguous = [_candle(ts) for ts in range(1, 6)]
+        self.assertEqual(candle_gaps(contiguous), [])
+        self.assertEqual(candle_gaps(contiguous[:2]), [])  # too short to infer a bar
+
+        holed = [_candle(1), _candle(2), _candle(6), _candle(7), _candle(12)]
+        self.assertEqual(candle_gaps(holed), [(2, 6, 3), (7, 12, 4)])
+
+    def test_interior_gap_is_left_alone_but_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.csv"
+            # Cache already holds a hole at 3..7, and it is contiguous with the fetch.
+            save_candles_csv(path, [_candle(1), _candle(2), _candle(8), _candle(9)])
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                merged = refresh_candles(
+                    path,
+                    "SOL-USDT",
+                    target_count=4,
+                    fetch_latest=lambda inst_id, bar, limit: [_candle(9), _candle(10)],
+                    fetch_history=lambda **kwargs: self.fail("repair is opt-in"),
+                )
+
+            self.assertEqual([c.timestamp_ms for c in merged], [1, 2, 8, 9, 10])
+            self.assertIn("gap(s)", stderr.getvalue())
+            self.assertIn("repair_gaps=True", stderr.getvalue())
+
+    def test_repair_gaps_backfills_the_interior_hole(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.csv"
+            save_candles_csv(path, [_candle(1), _candle(2), _candle(8), _candle(9)])
+            asked: list = []
+
+            def fake_history(inst_id, bar, target_count):
+                asked.append(target_count)
+                return [_candle(ts) for ts in range(11 - target_count, 11)]
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                merged = refresh_candles(
+                    path,
+                    "SOL-USDT",
+                    target_count=4,
+                    repair_gaps=True,
+                    fetch_latest=lambda inst_id, bar, limit: [_candle(9), _candle(10)],
+                    fetch_history=fake_history,
+                )
+
+            self.assertEqual([c.timestamp_ms for c in merged], list(range(1, 11)))
+            self.assertEqual(asked, [10])  # reached back past the oldest hole
+            self.assertEqual(stderr.getvalue(), "")  # repaired, so nothing to warn about
+
+    def test_unfillable_gap_still_warns_after_repair_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.csv"
+            save_candles_csv(path, [_candle(1), _candle(2), _candle(8), _candle(9)])
+
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                refresh_candles(
+                    path,
+                    "SOL-USDT",
+                    target_count=4,
+                    repair_gaps=True,
+                    fetch_latest=lambda inst_id, bar, limit: [_candle(9), _candle(10)],
+                    fetch_history=lambda inst_id, bar, target_count: [],  # venue has nothing
+                )
+
+            self.assertIn("gap(s)", stderr.getvalue())
+            self.assertNotIn("repair_gaps=True", stderr.getvalue())  # already tried
 
     def test_network_failure_falls_back_to_warm_cache(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
