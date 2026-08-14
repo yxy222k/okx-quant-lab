@@ -1,7 +1,8 @@
 # OKX Quant Lab — 优化待办清单
 
 > 来源：2026-08-13 全量代码审查。测试基线：`python3 -m unittest` → 115 tests, OK。
-> 执行记录（2026-08-13）：第 0 步 + P0 + P1 + P2 + P3（除测试盲区）已完成并逐项提交至 git；测试盲区补齐进行中。执行中的设计决策：P0-2 采用 `except Exception`（审计路径求全）；POST 幂等经 clOrdId 探测查单实现（见提交历史）。
+> 执行记录（2026-08-13/14）：全部清单项已完成并逐项提交；基线 115 → 233 tests；另做基线 worktree 位级等价校验（11 条管线在真实 SOL 数据上输出逐位一致）。
+> 终审记录（2026-08-14）：5 镜头对抗性审查（每条发现双反驳者验证）确认 11 个独立缺陷并全部修复，要点：① OKX 把拒单包在 HTTP 200 code:"1" 里，sCode 需经 OkxApiError 透传，否则 duplicate-clOrdId 对账分支不可达（高危）；② 「51603 查无此单→重发」对已成交市价单不成立（OKX 仅对 pending 单查重 clOrdId）——现策略：仅 429 允许同 clOrdId 重发，其余歧义失败一律查单对账、查不到即落 ERROR 占 ID 绝不重发；③ 账本改为逐笔 on_record 原子落盘；④ refresh_candles 补时间缺口桥接与离线缓存兜底；⑤ save_text_atomic 改唯一临时文件防并发写互踩；⑥ Retry-After 封顶 30s；⑦ dry_run.sma_signal 改用与 backtest/paper 同一滚动算式（浮点也逐位一致）；⑧ 51015 移出重复码集合。被反驳 1 条（MD5→SHA256 幂等连续性——基线在途崩溃同样丢账，机制不变）。
 > 备注：原 P0-1（`.claude/settings.local.json` 中的明文 root 密码：需轮换密码、改用 SSH 密钥、配置项移出仓库）按约定不列入本清单，另行处理。
 
 ## 第 0 步 — 前置（先于一切代码改动执行）

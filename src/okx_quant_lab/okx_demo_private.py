@@ -14,14 +14,26 @@ from urllib.request import Request, urlopen
 
 
 class OkxApiError(RuntimeError):
-    """OKX rejected the request. `code` is the OKX error code (e.g. "51603"),
-    `http_status` the HTTP status when the failure was an HTTP error.
+    """OKX rejected the request. `code` is the top-level OKX error code,
+    `scode`/`smsg` the per-order rejection detail from data[0] (OKX reports
+    single-order rejections as HTTP 200 {code:"1", data:[{sCode:...}]}, so
+    the sCode only ever travels inside this exception), and `http_status`
+    the HTTP status when the failure was an HTTP error.
     Subclasses RuntimeError so pre-existing handlers keep working."""
 
-    def __init__(self, message: str, code: str = "", http_status: int | None = None):
+    def __init__(
+        self,
+        message: str,
+        code: str = "",
+        http_status: int | None = None,
+        scode: str = "",
+        smsg: str = "",
+    ):
         super().__init__(message)
         self.code = code
         self.http_status = http_status
+        self.scode = scode
+        self.smsg = smsg
 
 
 BASE_URL = "https://www.okx.com"
@@ -157,18 +169,24 @@ def private_request(
             raise  # network errors keep their OSError identity for callers
 
         if payload.get("code") != "0":
+            rows = payload.get("data") or []
+            first = rows[0] if rows and isinstance(rows[0], dict) else {}
             raise OkxApiError(
-                f"OKX API error: code={payload.get('code')} msg={payload.get('msg')}",
+                f"OKX API error: code={payload.get('code')} msg={payload.get('msg')} "
+                f"sCode={first.get('sCode', '')} sMsg={first.get('sMsg', '')}",
                 code=str(payload.get("code") or ""),
+                scode=str(first.get("sCode") or ""),
+                smsg=str(first.get("sMsg") or ""),
             )
         return payload
 
 
 def retry_delay(retry_after_header: str | None, attempt: int) -> float:
-    """Honor Retry-After when the server sends one, else linear backoff."""
+    """Honor Retry-After when the server sends one (capped so a hostile or
+    broken header cannot park a cron script for hours), else linear backoff."""
     if retry_after_header:
         try:
-            return max(0.0, float(retry_after_header))
+            return min(30.0, max(0.0, float(retry_after_header)))
         except ValueError:
             pass
     return 1.0 + attempt

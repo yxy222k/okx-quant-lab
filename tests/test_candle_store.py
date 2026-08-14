@@ -67,6 +67,76 @@ class RefreshCandlesTest(unittest.TestCase):
 
             self.assertEqual([c.timestamp_ms for c in merged], [6, 7, 8, 9, 10])
 
+    def test_stale_cache_gap_is_bridged_with_history(self) -> None:
+        # Cache newest = ts 3, fresh fetch = ts 10..11 (bar interval 1): the
+        # hole 4..9 must be backfilled even though the row count is fine.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.csv"
+            save_candles_csv(path, [_candle(ts) for ts in range(1, 4)])
+            history_calls: list = []
+
+            def fake_history(inst_id, bar, target_count):
+                history_calls.append(target_count)
+                return [_candle(ts) for ts in range(12 - target_count, 12)]
+
+            merged = refresh_candles(
+                path,
+                "SOL-USDT",
+                target_count=3,
+                fetch_latest=lambda inst_id, bar, limit: [_candle(10), _candle(11)],
+                fetch_history=fake_history,
+            )
+
+            self.assertEqual(len(history_calls), 1)
+            self.assertGreaterEqual(history_calls[0], 8)  # reaches back past ts 3
+            self.assertEqual([c.timestamp_ms for c in merged], list(range(1, 12)))
+
+    def test_contiguous_cache_never_triggers_gap_backfill(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.csv"
+            save_candles_csv(path, [_candle(ts) for ts in range(1, 4)])
+
+            merged = refresh_candles(
+                path,
+                "SOL-USDT",
+                target_count=3,
+                fetch_latest=lambda inst_id, bar, limit: [_candle(4), _candle(5)],
+                fetch_history=lambda **kwargs: self.fail("no gap, no backfill"),
+            )
+
+            self.assertEqual([c.timestamp_ms for c in merged], [1, 2, 3, 4, 5])
+
+    def test_network_failure_falls_back_to_warm_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.csv"
+            save_candles_csv(path, [_candle(ts) for ts in range(1, 6)])
+
+            def failing_fetch(inst_id, bar, limit):
+                raise RuntimeError("request failed after retries")
+
+            merged = refresh_candles(
+                path,
+                "SOL-USDT",
+                target_count=3,
+                retention=4,
+                fetch_latest=failing_fetch,
+                fetch_history=lambda **kwargs: self.fail("offline: no history call"),
+            )
+
+            self.assertEqual([c.timestamp_ms for c in merged], [2, 3, 4, 5])
+            # cache untouched on disk
+            self.assertEqual(len(load_candles_csv(path)), 5)
+
+    def test_network_failure_with_cold_cache_still_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "missing.csv"
+
+            def failing_fetch(inst_id, bar, limit):
+                raise RuntimeError("request failed after retries")
+
+            with self.assertRaises(RuntimeError):
+                refresh_candles(path, "SOL-USDT", fetch_latest=failing_fetch)
+
     def test_retention_trims_the_saved_window(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "c.csv"
@@ -110,7 +180,7 @@ class CandleStoreTest(unittest.TestCase):
             ),
         ]
 
-        with tempfile.TemporaryDirectory(dir=ROOT) as dirname:
+        with tempfile.TemporaryDirectory() as dirname:
             path = Path(dirname) / "candles.csv"
 
             save_candles_csv(path, candles)

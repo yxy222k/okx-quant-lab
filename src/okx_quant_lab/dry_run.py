@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from okx_quant_lab.backtest import sma_wants_long
 from okx_quant_lab.okx_public import Candle
 from okx_quant_lab.paper import PaperConfig, PaperState
 from okx_quant_lab.state_store import load_ledger, save_ledger_atomic
@@ -37,10 +38,13 @@ def sma_signal(candles: list[Candle], config: PaperConfig) -> str:
         raise ValueError("not enough candles for SMA signal")
 
     sorted_candles = sorted(candles, key=lambda candle: candle.timestamp_ms)
-    previous = sorted_candles[-config.slow_window :]
-    fast_ma = _mean([row.close for row in previous[-config.fast_window :]])
-    slow_ma = _mean([row.close for row in previous])
-    return "LONG" if fast_ma > slow_ma else "CASH"
+    closes = [candle.close for candle in sorted_candles]
+    # Same rolling arithmetic as backtest/paper, so the live signal matches
+    # them bit-for-bit even at exact-tie MA values. The appended sentinel makes
+    # decisions[-1] the decision computed from ALL real closes; the sentinel
+    # itself never feeds the sums.
+    decisions = sma_wants_long(closes + [0.0], config.fast_window, config.slow_window)
+    return "LONG" if decisions[-1] else "CASH"
 
 
 def build_sma_order_request(

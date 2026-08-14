@@ -187,7 +187,8 @@ def _get_json(path: str, params: dict[str, str]) -> dict:
             if attempt < 2:
                 retry_after = error.headers.get("Retry-After")
                 try:
-                    delay = max(0.0, float(retry_after)) if retry_after else 1 + attempt
+                    # Capped: a broken header must not park a cron run for hours.
+                    delay = min(30.0, max(0.0, float(retry_after))) if retry_after else 1 + attempt
                 except ValueError:
                     delay = 1 + attempt
                 time.sleep(delay)

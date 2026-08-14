@@ -231,17 +231,87 @@ class DemoExecutorTest(unittest.TestCase):
         self.assertEqual(record.exchange_order_id, "ord-9")
         self.assertEqual(len(posts), 1)  # never resubmitted
 
-    def test_timed_out_post_resubmits_same_clordid_when_exchange_has_no_order(self) -> None:
+    def _no_sleep(self) -> None:
+        from okx_quant_lab import demo_execution as mod
+
+        original = mod._SLEEP
+        mod._SLEEP = lambda seconds: None
+        self.addCleanup(lambda: setattr(mod, "_SLEEP", original))
+
+    def test_timed_out_post_with_no_exchange_order_lands_error_never_resubmits(self) -> None:
+        # OKX only dedups clOrdIds among PENDING orders, so "not found now" is
+        # not proof the first POST never executed — the policy is: no resubmit.
+        self._no_sleep()
+        posts: list = []
+        probes: list = []
+
+        def request_fn(credentials, method, path, body=None):
+            if method == "POST":
+                posts.append(dict(body))
+                raise TimeoutError()
+            probes.append(path)
+            raise OkxApiError("OKX API error: code=51603", code="51603")
+
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn)
+        record = executor.submit(_request(), confirmed=True)
+
+        self.assertEqual(record.status, "ERROR")
+        self.assertIn("outcome unknown", record.message)
+        self.assertEqual(len(posts), 1)  # never resubmitted
+        self.assertEqual(len(probes), 2)  # probe + grace re-probe
+
+        retried = executor.submit(_request(), confirmed=True)
+        self.assertEqual(retried.status, "DUPLICATE")
+
+    def test_duplicate_clordid_rejection_reconciles_to_the_existing_order(self) -> None:
+        # Real transport shape: OKX rejects with HTTP 200 {code:"1"} and the
+        # sCode in data[0], which private_request raises as OkxApiError.
+        def request_fn(credentials, method, path, body=None):
+            if method == "POST":
+                raise OkxApiError(
+                    'OKX API error: code=1 sCode=51016',
+                    code="1", scode="51016", smsg="clOrdId duplicated",
+                )
+            if "clOrdId=" in path:
+                return {"code": "0", "data": [{"ordId": "ord-7", "state": "live"}]}
+            return {"code": "0", "data": [{"state": "live", "avgPx": "", "accFillSz": "",
+                                           "fee": "", "feeCcy": ""}]}
+
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn)
+        record = executor.submit(_request(), confirmed=True)
+
+        self.assertEqual(record.status, "SUBMITTED")
+        self.assertEqual(record.exchange_order_id, "ord-7")
+
+    def test_real_shape_exchange_rejection_is_recorded_as_rejected(self) -> None:
+        # A definitive per-order sCode (not a duplicate) must book REJECTED,
+        # not ERROR — the sCode travels inside OkxApiError on the real wire.
+        def request_fn(credentials, method, path, body=None):
+            if method == "POST":
+                raise OkxApiError(
+                    "OKX API error: code=1 sCode=51121",
+                    code="1", scode="51121", smsg="Order quantity precision error",
+                )
+            raise AssertionError("no probe expected for a definitive rejection")
+
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn)
+        record = executor.submit(_request(), confirmed=True)
+
+        self.assertEqual(record.status, "REJECTED")
+        self.assertIn("precision", record.message)
+
+    def test_rate_limited_post_retries_once_with_the_same_clordid(self) -> None:
+        # 429 means the rate limiter rejected the request before the order
+        # engine saw it — the one provably-safe POST retry.
+        self._no_sleep()
         posts: list = []
 
         def request_fn(credentials, method, path, body=None):
             if method == "POST":
                 posts.append(dict(body))
                 if len(posts) == 1:
-                    raise TimeoutError()
-                return {"code": "0", "data": [{"sCode": "0", "ordId": "ord-2"}]}
-            if "clOrdId=" in path:
-                raise OkxApiError("OKX API error: code=51603", code="51603")
+                    raise OkxApiError("OKX API HTTP 429", code="50011", http_status=429)
+                return {"code": "0", "data": [{"sCode": "0", "ordId": "ord-3"}]}
             return {
                 "code": "0",
                 "data": [{"state": "filled", "avgPx": "100", "accFillSz": "0.1",
@@ -253,22 +323,7 @@ class DemoExecutorTest(unittest.TestCase):
 
         self.assertEqual(record.status, "FILLED")
         self.assertEqual(len(posts), 2)
-        self.assertEqual(posts[0]["clOrdId"], posts[1]["clOrdId"])  # idempotent retry
-
-    def test_duplicate_clordid_rejection_reconciles_to_the_existing_order(self) -> None:
-        def request_fn(credentials, method, path, body=None):
-            if method == "POST":
-                return {"code": "0", "data": [{"sCode": "51016", "sMsg": "clOrdId duplicated"}]}
-            if "clOrdId=" in path:
-                return {"code": "0", "data": [{"ordId": "ord-7", "state": "live"}]}
-            return {"code": "0", "data": [{"state": "live", "avgPx": "", "accFillSz": "",
-                                           "fee": "", "feeCcy": ""}]}
-
-        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn)
-        record = executor.submit(_request(), confirmed=True)
-
-        self.assertEqual(record.status, "SUBMITTED")
-        self.assertEqual(record.exchange_order_id, "ord-7")
+        self.assertEqual(posts[0]["clOrdId"], posts[1]["clOrdId"])
 
     def test_unreachable_probe_after_timeout_lands_as_error_and_consumes_id(self) -> None:
         def request_fn(credentials, method, path, body=None):

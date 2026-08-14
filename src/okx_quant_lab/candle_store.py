@@ -72,11 +72,25 @@ def refresh_candles(
     fetch_history = fetch_history or fetch_historical_candles
 
     existing = load_candles_csv(path) if path.exists() else []
-    latest = fetch_latest(inst_id, bar=bar, limit=latest_limit)
+    try:
+        latest = fetch_latest(inst_id, bar=bar, limit=latest_limit)
+    except (RuntimeError, OSError):
+        if not existing:
+            raise
+        # Offline fallback: research scripts used to run from a warm cache;
+        # a network hiccup should degrade to stale data, not a traceback.
+        return existing[-retention:] if retention is not None else existing
     candles = merge_candles(existing, latest)
 
     if len(candles) < target_count:
         history = fetch_history(inst_id, bar=bar, target_count=target_count)
+        candles = merge_candles(history, candles)
+
+    # A cache staler than latest_limit bars leaves a hole between its newest
+    # candle and the fresh fetch that a row-count check can't see; bridge it.
+    bridge_target = _gap_bridge_target(existing, latest)
+    if bridge_target:
+        history = fetch_history(inst_id, bar=bar, target_count=bridge_target)
         candles = merge_candles(history, candles)
 
     if retention is not None:
@@ -84,6 +98,22 @@ def refresh_candles(
 
     save_candles_csv(path, candles)
     return candles
+
+
+def _gap_bridge_target(existing: list[Candle], latest: list[Candle]) -> int | None:
+    """Bars of history (counted back from the fetch head) needed to bridge a
+    hole between a stale cache and a fresh fetch; None when contiguous."""
+    if not existing or len(latest) < 2:
+        return None
+    bar_ms = min(b.timestamp_ms - a.timestamp_ms for a, b in zip(latest, latest[1:]))
+    if bar_ms <= 0:
+        return None
+    newest_cached = existing[-1].timestamp_ms
+    if latest[0].timestamp_ms <= newest_cached + bar_ms:
+        return None  # overlapping or adjacent: no hole
+    # fetch_historical_candles pages back from now, so count from the fetch
+    # head to the cached edge, with slack for the boundary bars.
+    return int((latest[-1].timestamp_ms - newest_cached) // bar_ms + 2)
 
 
 def merge_candles(*groups: list[Candle]) -> list[Candle]:

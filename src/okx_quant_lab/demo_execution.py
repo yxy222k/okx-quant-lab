@@ -3,17 +3,27 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 from pathlib import Path
+import time
 from typing import Callable
 
 from okx_quant_lab.dry_run import OrderRequest
-from okx_quant_lab.okx_demo_private import DemoCredentials, OkxApiError, private_request
+from okx_quant_lab.okx_demo_private import (
+    DemoCredentials,
+    OkxApiError,
+    private_request,
+    retry_delay,
+)
 from okx_quant_lab.safety import ExecutionIntent, evaluate_execution_safety
 from okx_quant_lab.state_store import load_ledger, save_ledger_atomic
 
-# OKX order-submission sCodes for "this clOrdId was already used".
-_DUPLICATE_CLORDID_SCODES = {"51015", "51016"}
+# OKX order-submission sCode for "this clOrdId was already used" (51016 only:
+# 51015 is an instId/instType mismatch, an ordinary parameter rejection).
+_DUPLICATE_CLORDID_SCODES = {"51016"}
 # OKX code for "order does not exist" when querying by clOrdId.
 _ORDER_NOT_FOUND_CODE = "51603"
+# Seams for tests: probe grace and 429 backoff go through these.
+_SLEEP = time.sleep
+_PROBE_GRACE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -49,11 +59,16 @@ class DemoOrderExecutor:
         limits: DemoExecutionLimits,
         records: list[DemoOrderRecord] | None = None,
         request_fn: Callable[..., dict] = private_request,
+        on_record: Callable[[list[DemoOrderRecord]], None] | None = None,
     ) -> None:
         self._credentials = credentials
         self._limits = limits
         self._records = list(records or [])
         self._request_fn = request_fn
+        # Called with the full record list after EVERY new record, so callers
+        # can persist the ledger incrementally: a crash between an exchange
+        # fill and a batch-end save must not lose the audit record.
+        self._on_record = on_record
         # client_order_id -> record, BLOCKED excluded (see _find_by_client_order_id).
         # lesson_28 submits against a ledger that only ever grows; a linear scan
         # per order would make every run slower than the last.
@@ -157,15 +172,21 @@ class DemoOrderExecutor:
         )
 
     def _post_order_idempotent(self, inst_id: str, body: dict, attempts: int = 3) -> dict:
-        """Submit the order; never a blind retry.
+        """Submit the order; never a blind retry, never resubmit after an
+        ambiguous failure.
 
-        After a network failure or retryable HTTP error the original POST may
-        already have filled on the exchange, so each retry round first queries
-        by clOrdId: found -> synthesize an accepted payload and reconcile via
-        the normal confirm path; confirmed absent -> resubmitting the SAME
-        clOrdId is safe. A duplicate-clOrdId rejection is handled the same way.
-        If the probe itself fails, the exception propagates and submit()
-        records ERROR, consuming the id — uncertainty must never auto-retry.
+        A 429 is the only failure that provably means "not processed", so it
+        is the only case that re-POSTs (with the same clOrdId). Everything
+        ambiguous — a network error, a 5xx, an opaque exchange error — goes to
+        a clOrdId probe instead: found -> reconcile to the existing order;
+        confirmed absent -> raise ANYWAY, because OKX only dedups clOrdIds
+        among PENDING orders, so a market order that filled during the failure
+        window would not stop a resubmission from filling twice. The raise
+        lands in submit()'s audit catch, records ERROR, and consumes the id —
+        clearing an ERROR means investigating, not resubmitting. A definitive
+        per-order rejection (sCode from the exchange, surfaced via
+        OkxApiError.scode because OKX wraps it in an HTTP-200 code:"1" body)
+        is returned to the caller so it books REJECTED.
         """
         cl_ord_id = body["clOrdId"]
         last_error: Exception | None = None
@@ -176,12 +197,28 @@ class DemoOrderExecutor:
                     self._credentials, "POST", "/api/v5/trade/order", body
                 )
             except OkxApiError as error:
-                status = error.http_status or 0
-                if status != 429 and status < 500:
-                    raise  # 4xx / API-level rejections: retrying is futile
-                last_error = error
+                if error.scode in _DUPLICATE_CLORDID_SCODES:
+                    last_error = error  # id already used: reconcile via probe
+                elif error.scode:
+                    # Definitive per-order rejection: nothing was placed.
+                    return {
+                        "code": error.code,
+                        "data": [{"sCode": error.scode, "sMsg": error.smsg}],
+                    }
+                elif error.http_status == 429:
+                    # Rate limiter rejected the request before the order engine
+                    # saw it: the one provably-safe retry.
+                    last_error = error
+                    if attempt < attempts - 1:
+                        _SLEEP(retry_delay(None, attempt))
+                        continue
+                    break
+                elif error.http_status is not None and error.http_status < 500:
+                    raise  # other HTTP 4xx: rejected before processing
+                else:
+                    last_error = error  # 5xx / opaque API error: ambiguous
             except OSError as error:  # TimeoutError, URLError, connection resets
-                last_error = error
+                last_error = error  # ambiguous: the order may be in flight
             else:
                 result = (payload.get("data") or [{}])[0]
                 if result.get("sCode") not in _DUPLICATE_CLORDID_SCODES:
@@ -190,18 +227,28 @@ class DemoOrderExecutor:
                     f"duplicate clOrdId {cl_ord_id}: {result.get('sMsg', '')}"
                 )
 
-            existing = self._find_order_by_client_id(inst_id, cl_ord_id)
+            existing = self._probe_order(inst_id, cl_ord_id)
             if existing is not None:
                 # The lost/duplicated submission actually landed.
                 return {
                     "code": "0",
                     "data": [{"sCode": "0", "ordId": existing.get("ordId", "")}],
                 }
+            break  # confirmed absent now != never placed; do NOT resubmit
 
         raise RuntimeError(
-            f"order POST failed after {attempts} attempts "
-            f"(clOrdId {cl_ord_id} not on exchange): {last_error}"
+            f"order POST outcome unknown (clOrdId {cl_ord_id} not found on the "
+            f"exchange, but a late fill cannot be ruled out): {last_error}"
         ) from last_error
+
+    def _probe_order(self, inst_id: str, cl_ord_id: str) -> dict | None:
+        existing = self._find_order_by_client_id(inst_id, cl_ord_id)
+        if existing is None:
+            # One grace retry: a POST that timed out client-side may register
+            # on the exchange moments later.
+            _SLEEP(_PROBE_GRACE_SECONDS)
+            existing = self._find_order_by_client_id(inst_id, cl_ord_id)
+        return existing
 
     def _find_order_by_client_id(self, inst_id: str, cl_ord_id: str) -> dict | None:
         """Query by clOrdId; None means the exchange confirmed it doesn't exist."""
@@ -278,6 +325,8 @@ class DemoOrderExecutor:
         self._records.append(record)
         if status != "BLOCKED":
             self._by_client_order_id[request.client_order_id] = record
+        if self._on_record is not None:
+            self._on_record(self.records)
         return record
 
     def _find_by_client_order_id(self, client_order_id: str) -> DemoOrderRecord | None:

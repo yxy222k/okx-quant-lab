@@ -137,6 +137,7 @@ class RunMarketTest(unittest.TestCase):
         "state_path",
         "ledger_path",
         "candle_path",
+        "DemoOrderExecutor",
     )
 
     def setUp(self) -> None:
@@ -169,6 +170,17 @@ class RunMarketTest(unittest.TestCase):
         loop_mod.state_path = lambda inst_id: self.tmp / f"{inst_id}_state.json"
         loop_mod.ledger_path = lambda inst_id: self.tmp / f"{inst_id}_ledger.json"
         loop_mod.candle_path = lambda inst_id: self.tmp / f"{inst_id}_candles.csv"
+
+        # Belt AND suspenders: the safety gate should block every submission
+        # (confirmed=False), but the executor must not be able to reach the
+        # network even if that gate regresses — inject a raising request_fn.
+        def _forbid_network(*args, **kwargs):
+            raise AssertionError("test attempted a real OKX request")
+
+        original_executor = loop_mod.DemoOrderExecutor
+        loop_mod.DemoOrderExecutor = lambda *args, **kwargs: original_executor(
+            *args, **{**kwargs, "request_fn": _forbid_network}
+        )
 
         self.credentials = DemoCredentials(api_key="k", secret_key="s", passphrase="p")
 

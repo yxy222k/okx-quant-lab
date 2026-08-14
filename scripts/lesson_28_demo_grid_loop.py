@@ -120,7 +120,16 @@ def _run_market(inst_id: str, credentials, confirmed: bool) -> tuple[list[str], 
 
     spec = fetch_instrument_spec(inst_id)
     records = load_demo_order_ledger(ledger_path(inst_id)) if ledger_path(inst_id).exists() else []
-    executor = DemoOrderExecutor(credentials, LIMITS, records=records)
+    executor = DemoOrderExecutor(
+        credentials,
+        LIMITS,
+        records=records,
+        # Persist after every record: a crash mid-batch must not lose the
+        # audit trail of a fill that already happened on the exchange.
+        on_record=lambda all_records: save_demo_order_ledger(
+            ledger_path(inst_id), all_records
+        ),
+    )
 
     deployed_now = not state_path(inst_id).exists()
     if deployed_now:
