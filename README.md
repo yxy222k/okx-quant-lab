@@ -412,6 +412,13 @@ The schedule only moves paper state built from public data. Nothing in this loop
 
 ## Known Minor Limitations
 
+> Since 2026-08-13 this project is under git. Fixes are recorded in the commit
+> history rather than listed here; `git log --oneline` is the current ledger of
+> changes. The 2026-08-13/14 refactor pass (dedup into `market_math`,
+> `state_store`, `walk_forward_core`, `candle_store.refresh_candles`; idempotent
+> order submission; 115 → 235 tests) was verified bit-identical against the
+> pre-refactor baseline on real candles for every research pipeline.
+
 A multi-lens adversarial review (2026-07-24) confirmed the strategies carry no
 lookahead bias. It also surfaced small issues. Five were fixed (defensive input
 sort in `run_sma_backtest`; a cash-floor guard on paper-grid buys; a
@@ -438,6 +445,21 @@ because they are modelling nuances or live-safety definitions rather than bugs:
 - **`fills_24h` counts on candle-open timestamp**, not wall-clock fill time —
   off by at most one bar over a 24h window. Allocation denominators in the daily
   summary are constants matching the deployed config.
+- **The demo venue cancels some market orders.** OKX's simulated book is thin,
+  so its price protection cancels a market order whose estimated fill slips ≥5%
+  past the best bid/ask (`cancelSource: 15`); seven SOL orders hit this in
+  August 2026. Those land in the ledger as `CANCELED` and the slot simply
+  retries on the next triggering candle. A cancel that filled *part* of the
+  order is recorded as `PARTIAL`: the grid only books whole fills, so the local
+  book has drifted and needs manual reconciliation. Ledger rows written before
+  2026-08-14 show these as `SUBMITTED` — the audit trail was left intact, and
+  their `message` field carries the real `state=canceled`.
+- **An order query is not proof of absence.** `/api/v5/trade/order` answers
+  `51603 "Order does not exist"` for orders that were genuinely placed and have
+  since gone terminal (use `/api/v5/trade/orders-history` for those). This is
+  why `_post_order_idempotent` never resubmits after an ambiguous failure: only
+  a 429, which the rate limiter rejects before the matching engine sees it, is
+  provably safe to retry.
 
 ## Safety Rules
 
