@@ -246,12 +246,12 @@ class IdleGridNoteTest(unittest.TestCase):
         self.assertIn("-9.1%", note)  # 110 / 121 - 1
         self.assertIn("从未成交", note)
 
-    def test_below_range_and_empty_is_flagged_toward_the_lower_edge(self) -> None:
+    def test_below_range_and_empty_is_not_idle_it_buys_next_bar(self) -> None:
+        # Below the range every armed level satisfies close <= level, so an
+        # empty grid there acts on the next candle — flagging it as "can never
+        # fill again" would be wrong (found in the 2026-08-27 review).
         state = self._state([0.0] * 4, levels=[90.0, 95.0, 100.0, 105.0, 110.0])
-        note = self._note("SOL-USDT", state, 45.0, [], 1_000_000)
-
-        self.assertIn("+100.0%", note)  # 90 / 45 - 1
-        self.assertIn("90.0000", note)
+        self.assertIsNone(self._note("SOL-USDT", state, 45.0, [], 1_000_000))
 
     def test_holding_inventory_is_never_idle(self) -> None:
         state = self._state([0.0, 1.0, 0.0, 0.0], levels=[90.0, 95.0, 100.0, 105.0, 110.0])

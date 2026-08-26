@@ -16,9 +16,15 @@ that identically to losing. Ties are the whole point of a selective rule.
 The segment mechanics are asserted against run_grid_backtest before any
 numbers are reported, so this is the tested engine with re-anchoring on top.
 
+Markets are discovered from the candle directory (every *_1H_long.csv), so
+the table is reproducible for however many markets have been fetched.
+
 Usage:
-  python3 scripts/reanchor_study.py [candle_dir]   # default data/candles
-Expects <INST>_1H_long.csv files; fetch them with:
+  python3 scripts/reanchor_study.py [candle_dir] [--close-confirmed]
+candle_dir defaults to data/candles. --close-confirmed switches every
+simulation to the LIVE demo_grid semantics (act on closes, fill at the close
+with a market order) instead of the optimistic intrabar limit model; run both
+and compare before trusting any ranking. Fetch inputs with:
   refresh_candles(path, inst, bar="1H", target_count=26280, repair_gaps=True)
 """
 from __future__ import annotations
@@ -36,7 +42,6 @@ if str(SRC) not in sys.path:
 from okx_quant_lab.candle_store import load_candles_csv
 from okx_quant_lab.grid_strategy import grid_config_from_reference, run_grid_backtest
 
-MARKETS = ["BTC-USDT", "ETH-USDT", "SOL-USDT"]
 DAY = 24  # 1H bars
 ALLOCATION, RANGE_PCT, SLOTS, FEE = 100.0, 15.0, 20, 0.001
 
@@ -59,8 +64,10 @@ def simulate(candles, rule, alloc=ALLOCATION, close_confirmed=False):
     close_confirmed=True switches to the LIVE demo_grid semantics — a slot acts
     only when a candle CLOSES beyond its level, filling at that close with a
     market order — instead of the optimistic intrabar limit model the research
-    backtests use. The rule ranking holds under both, which is the point of
-    having the switch.
+    backtests use. Run main() with --close-confirmed to produce that table;
+    on the 10-market sample every rule scored slightly better under it, but
+    the top of the mean-delta ranking reordered (exit 3d overtook up-only),
+    so check both before trusting an ordering.
     """
     equity, curve, anchors, trips = alloc, [], 0, 0
     index = 0
@@ -124,15 +131,22 @@ def simulate(candles, rule, alloc=ALLOCATION, close_confirmed=False):
     }
 
 
+def load_markets(candle_dir: Path) -> dict:
+    """Every *_1H_long.csv in the directory is a market in the study."""
+    paths = sorted(candle_dir.glob("*_1H_long.csv"))
+    if not paths:
+        raise SystemExit(
+            f"no *_1H_long.csv under {candle_dir} — see the module docstring"
+        )
+    return {p.name.replace("_1H_long.csv", ""): load_candles_csv(p) for p in paths}
+
+
 def main() -> int:
-    candle_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else ROOT / "data" / "candles"
-    data = {}
-    for market in MARKETS:
-        path = candle_dir / f"{market}_1H_long.csv"
-        if not path.exists():
-            print(f"missing {path} — see the module docstring for how to fetch it")
-            return 1
-        data[market] = load_candles_csv(path)
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    close_confirmed = "--close-confirmed" in sys.argv[1:]
+    candle_dir = Path(args[0]) if args else ROOT / "data" / "candles"
+    data = load_markets(candle_dir)
+    markets = list(data)
 
     for market, candles in data.items():  # the engine this is built on must agree
         mine = simulate(candles, RULES["never"])["return_pct"]
@@ -144,7 +158,8 @@ def main() -> int:
             ),
         ).return_pct
         assert abs(mine - theirs) < 1e-6, f"{market}: {mine} != {theirs}"
-    print("segment mechanics match run_grid_backtest\n")
+    print("segment mechanics match run_grid_backtest")
+    print(f"execution model: {'close-confirmed market fills (live semantics)' if close_confirmed else 'intrabar limit fills (research model)'}\n")
 
     window, step = 90 * DAY, 30 * DAY
     windows = {
@@ -152,18 +167,19 @@ def main() -> int:
         for m, c in data.items()
     }
     regimes, results = [], {}
-    for market in MARKETS:
+    for market in markets:
         for candles in windows[market]:
             move = (candles[-1].close / candles[0].open - 1) * 100
             regimes.append("bull" if move > 15 else "bear" if move < -15 else "range")
 
     for name, rule in RULES.items():
         results[name] = [
-            simulate(w, rule)["return_pct"] for m in MARKETS for w in windows[m]
+            simulate(w, rule, close_confirmed=close_confirmed)["return_pct"]
+            for m in markets for w in windows[m]
         ]
 
     total = len(regimes)
-    print(f"rolling 90d windows, {total} across {len(MARKETS)} markets "
+    print(f"rolling 90d windows, {total} across {len(markets)} markets "
           f"(bull {regimes.count('bull')} / range {regimes.count('range')} / bear {regimes.count('bear')})")
     header = f"{'rule':<14} {'median':>8}" + "".join(
         f"{tag + ' delta/tie':>20}" for tag in ("bull", "range", "bear")
@@ -186,6 +202,11 @@ def main() -> int:
     print("tie = share of windows the rule left untouched (it never fired). A rule that")
     print("ties in a regime costs nothing there — that is very different from losing,")
     print("and it is what makes a selective rule worth more than an aggressive one.")
+    print()
+    print("CAVEAT: regime labels come from each window's own realized return, and for")
+    print("up-only the fire condition (close above anchor*1.15) nearly coincides with")
+    print("the bull label. The per-regime split is descriptive attribution — it cannot")
+    print("be traded on, because the label is only known after the window ends.")
     return 0
 
 

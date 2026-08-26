@@ -415,8 +415,12 @@ The schedule only moves paper state built from public data. Nothing in this loop
 Three grids ran on OKX demo for 46 days: 100 USDT each, 20 slots x 5 USDT,
 ±15% around the deploy price, close-confirmed on 15m bars. Numbers below are
 reconstructed by replaying the order ledger against the candle files, and they
-reproduce the live book to within a cent (307.09 vs 307.06, the difference
-being ticker vs candle-close marking).
+reproduce the live book to within a cent (307.09 vs 307.06). The residual is
+NOT a marking difference — every grid holds zero inventory, so the mark price
+cancels out of both numbers. It is sub-lot dust the live book discards at each
+sell (the slot is zeroed after selling only the lot-quantized quantity) while
+a ledger-only replay cannot know per-slot dust; the script now reconciles
+against the live state and prints the gap instead of hiding it.
 
 | market | round trips | grid return | max drawdown | buy & hold |
 |--------|-------------|-------------|--------------|------------|
@@ -455,64 +459,74 @@ thin book (`CANCELED` in the ledger, retried on the next candle), and a
 75-minute OKX outage on 2026-08-20 produced five `ERROR` rows on one BTC sell
 that filled normally once the venue recovered.
 
-### How to re-anchor (measured, 2026-08-26)
+### How to re-anchor (measured 2026-08-26, corrected 2026-08-27)
 
-Two scripts. `reanchor_study.py` chains grid deployments under several rules
-over three years of hourly data across ten markets and splits 340 rolling
-90-day windows by regime; `reanchor_significance.py` re-runs it on
-non-overlapping windows with a sign test and a date-block bootstrap, because
-overlapping windows and ten correlated crypto markets both inflate "n". The
-segment mechanics are asserted equal to `run_grid_backtest`, and both can run
-the live close-confirmed model as well as the research intrabar one.
+Two scripts, both reproducible as committed: `reanchor_study.py` (markets
+auto-discovered from the candle dir, `--close-confirmed` switches to the live
+execution model) and `reanchor_significance.py` (non-overlapping windows,
+pooled + clustered sign tests, exact cluster sign-flip permutation test,
+date-block bootstrap). Segment mechanics are asserted equal to
+`run_grid_backtest` before either prints a number.
 
-Δ is median percentage points against never-re-anchoring; "tie" is the share of
-windows the rule never fired in. Ten markets, 340 windows (123 bull / 92 range
-/ 125 bear), intrabar fills:
+Effect sizes on ten markets, 340 rolling 90-day windows (123 bull / 92 range /
+125 bear), intrabar fills. Δ is median percentage points against
+never-re-anchoring; "tie" is the share of windows the rule never fired in:
 
 | rule | bull Δ / tie | range Δ / tie | bear Δ / tie | mean Δ |
 |------|--------------|---------------|--------------|--------|
 | every 7d | -1.32 / 0% | -6.39 / 0% | +7.12 / 0% | -0.02 |
 | exit range 1d, both ways | +2.55 / 0% | -7.52 / 23% | +4.12 / 1% | -0.02 |
 | exit range 3d | +2.50 / 0% | -5.09 / 34% | +2.70 / 2% | +1.10 |
-| **up-only 1d** | **+4.29** / 0% | **0.00 / 57%** | **0.00 / 89%** | **+1.27** |
+| up-only 1d | +4.29 / 0% | 0.00 / 57% | 0.00 / 89% | +1.27 |
 | down-only 1d | 0.00 / 93% | 0.00 / 52% | +4.97 / 1% | +0.12 |
 
-Significance on 120 non-overlapping windows:
+Significance on 120 non-overlapping windows (12 date buckets × 10 markets):
 
-| rule | help/hurt/tie | sign test p | bootstrap 95% CI of mean Δ |
-|------|---------------|-------------|----------------------------|
-| exit 1d, both ways | 62 / 47 / 11 | 0.180 | [-4.36, +2.23] |
-| **up-only 1d** | **45 / 18 / 57** | **0.001** | **[-0.57, +2.50]** |
-| down-only 1d | 32 / 29 / 59 | 0.798 | [-3.95, +1.98] |
-| every 7d | 53 / 67 / 0 | 0.235 | [-5.59, +2.04] |
+| rule | help/hurt/tie | naive p | clustered p | perm p | bootstrap 95% CI |
+|------|---------------|---------|-------------|--------|------------------|
+| exit 1d | 62/47/11 | 0.180 | 1.000 | 0.584 | [-4.36, +2.23] |
+| exit 3d | 60/48/12 | 0.290 | 0.774 | 0.970 | [-2.60, +2.11] |
+| up-only 1d | 45/18/57 | **0.001** | **1.000** | **0.316** | [-0.57, +2.50] |
+| down-only 1d | 32/29/59 | 0.798 | 0.754 | 0.631 | [-3.95, +1.98] |
+| every 7d | 53/67/0 | 0.235 | 0.388 | 0.392 | [-5.59, +2.04] |
 
-- **Only the selective rule has evidence behind it, and only for its
-  direction.** Re-anchor after a top exit and it helps 45 windows to 18
-  (p=0.001) — but the bootstrap CI on the average effect still spans zero.
-  The sign test counts windows; the bootstrap counts independent time periods,
-  and three years of correlated crypto contains very few of those.
-- **So treat it as a liveness rule, not a profit rule.** The demo phase did not
-  fail on return (+2.36%, -0.91% drawdown) — it failed by ceasing to exist. Up
-  only re-anchoring is the cheapest fix for that, and the evidence says it
-  probably does not cost anything. It does not say it earns anything.
-- **Everything else is noise.** Two-sided, down-only and calendar rules all sit
-  at p >= 0.18 with CIs spanning ±4pp. The two-sided rule looked strong on
-  three markets (mean Δ +1.74) and fell to -0.02 across ten — a sample-size
-  lesson, not a market-regime one.
-- **Down-side re-anchoring is a stop-loss wearing a costume.** Its bear-regime
-  +4.97pp comes entirely from liquidating trapped inventory at a loss and
-  redeploying lower. Adopt that as a risk decision, not a parameter.
-- **Out of sample everything decays.** On a chronological dev/holdout split the
-  best-on-dev rule fell from +2.48 to +0.06 mean Δ. Trend filters (Kaufman
-  efficiency ratio, 30-day momentum) cut the ranging cost in-sample and did not
-  survive that split either.
-- **Live execution does not change the ranking.** Under close-confirmed market
-  fills every rule scores slightly better, so none of this is an artifact of
-  the optimistic intrabar model.
+**The verdict: no rule is distinguishable from noise — direction included.**
+The first write-up of this study claimed up-only re-anchoring had "a reliable
+direction" on the strength of naive p=0.001. That number pooled 120
+market-windows as independent trials when ten crypto markets move together:
+the 45-vs-18 split comes from ~10 informative date buckets, two of which
+(9/9 and 10/10 markets helped) supply 19 of the 45 "helps" between them.
+Collapse each period to one observation and the sign test gives p=1.0; the
+exact permutation test gives p=0.316. The correction is recorded here because
+the mistake — counting correlated markets as independent evidence — is the
+single easiest way to fool yourself with a multi-market study.
+
+What actually survives:
+
+- **A structural argument, not a statistical one.** Up-only re-anchoring never
+  fired in 57-89% of non-bull windows, so whatever it does, it cannot cost
+  much where it does not act. If a re-anchor rule is ever adopted, that is
+  the shape to prefer — as a *liveness* mechanism (the demo phase failed by
+  ceasing to trade, not by losing), with no measured profit expectation.
+- **Down-side re-anchoring remains a stop-loss in a costume** (its bear-regime
+  Δ comes from liquidating trapped inventory at a loss) and now also has no
+  statistical support. Adopting it is a risk decision, not a parameter.
+- **Regime rows are descriptive, not tradable**: the bull/range/bear label is
+  each window's own realized return, and up-only's fire condition nearly
+  coincides with the bull label. Attribution, not an ex-ante signal.
+- **Close-confirmed (live) fills score every rule slightly better but reorder
+  the top**: exit 3d overtakes up-only on mean Δ (+1.83 vs +1.54). Run both
+  models (`--close-confirmed`) before trusting any ordering.
+- Exploratory-only, produced by uncommitted scratch code and reported here for
+  the record: a chronological dev/holdout split decayed the best-on-dev rule
+  from +2.48 to +0.06 mean Δ, and Kaufman-ER / 30-day-momentum gates on the
+  two-sided rule did not survive that split either.
 
 A one-year test of the same rules ranked "every 7d" first — that year was a
-bear market in all three names then tested. Do not tune this on one regime, or
-on one handful of markets.
+bear market in all three names then tested — and a three-market run showed
+exit-1d at mean Δ +1.74 where ten markets show -0.02. Sample size and regime
+mix flip the ordering; treat any grid-rule study smaller than this with
+suspicion.
 
 **Decision (2026-08-26): the grids were deliberately NOT re-anchored.** Nothing
 about the current price argues it is a good place to rebuild a range, and

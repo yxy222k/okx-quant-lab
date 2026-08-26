@@ -78,7 +78,7 @@ def main() -> int:
         f"24h成交 {total_fills_24h}"
     )
     if idle_notes:
-        lines.append("⚠️ 网格闲置(空仓且价格在区间外，不会再成交): " + "; ".join(idle_notes))
+        lines.append("⚠️ 网格闲置(空仓且价格在区间上方，不会再成交): " + "; ".join(idle_notes))
 
     try:
         balance = fetch_demo_balance(load_demo_credentials())
@@ -101,21 +101,23 @@ def _idle_grid_note(
 ) -> str | None:
     """Flag a grid that has stopped participating entirely.
 
-    A long-only grid holding nothing while price sits outside its range can
-    never fill: there is no inventory to sell and every buy level is out of
-    reach. That is not a risk condition, which is why the hourly watchdog
-    stays silent on it (below-range trapped inventory is the one it guards),
-    but it does mean the strategy is doing nothing at all — a fact worth
-    stating once a day rather than leaving for someone to notice.
+    Only ABOVE the range: an empty grid up there has nothing to sell and every
+    buy level out of reach, so it truly cannot act. An empty grid BELOW its
+    range is the opposite of idle — armed slots trigger on close <= level, and
+    below the range every level satisfies that, so it will buy on the next
+    processed candle (and the hourly watchdog's below-range check covers the
+    trapped-inventory case). Not a risk condition, which is why the watchdogs
+    stay silent on it, but the strategy doing nothing at all is worth stating
+    once a day rather than leaving for someone to notice.
     """
     if open_slot_count(state) > 0:
         return None
-    lower, upper = state.levels[0], state.levels[-1]
-    if lower <= mark <= upper:
+    upper = state.levels[-1]
+    if mark <= upper:
         return None
 
     symbol = inst_id.split("-")[0]
-    edge = upper if mark > upper else lower
+    edge = upper
     move_pct = (edge / mark - 1) * 100
     fills = [r for r in records if r.status == "FILLED"]
     if fills:
