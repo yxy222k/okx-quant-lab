@@ -42,6 +42,7 @@ def main() -> int:
     total_equity = 0.0
     total_realized = 0.0
     total_fills_24h = 0
+    idle_notes: list[str] = []
     for inst_id in MARKETS:
         state_path = ROOT / "data" / "demo" / f"{inst_id}_15m_demo_grid_state.json"
         ledger_path = ROOT / "data" / "orders" / f"demo_grid_orders_{inst_id}.json"
@@ -68,11 +69,16 @@ def main() -> int:
             f"{open_slot_count(state)}/20 已实现 {state.realized_profit:+.2f} "
             f"24h成交 {fills_24h}{below}{breaker}"
         )
+        idle = _idle_grid_note(inst_id, state, mark, records, now_ms)
+        if idle:
+            idle_notes.append(idle)
 
     lines.append(
         f"网格合计: 权益 {total_equity:.2f}/300 已实现 {total_realized:+.2f} "
         f"24h成交 {total_fills_24h}"
     )
+    if idle_notes:
+        lines.append("⚠️ 网格闲置(空仓且价格在区间外，不会再成交): " + "; ".join(idle_notes))
 
     try:
         balance = fetch_demo_balance(load_demo_credentials())
@@ -84,6 +90,40 @@ def main() -> int:
     lines.append(_reconcile_line())
     print("\n".join(lines))
     return 0
+
+
+def _idle_grid_note(
+    inst_id: str,
+    state,
+    mark: float,
+    records: list,
+    now_ms: int,
+) -> str | None:
+    """Flag a grid that has stopped participating entirely.
+
+    A long-only grid holding nothing while price sits outside its range can
+    never fill: there is no inventory to sell and every buy level is out of
+    reach. That is not a risk condition, which is why the hourly watchdog
+    stays silent on it (below-range trapped inventory is the one it guards),
+    but it does mean the strategy is doing nothing at all — a fact worth
+    stating once a day rather than leaving for someone to notice.
+    """
+    if open_slot_count(state) > 0:
+        return None
+    lower, upper = state.levels[0], state.levels[-1]
+    if lower <= mark <= upper:
+        return None
+
+    symbol = inst_id.split("-")[0]
+    edge = upper if mark > upper else lower
+    move_pct = (edge / mark - 1) * 100
+    fills = [r for r in records if r.status == "FILLED"]
+    if fills:
+        days = (now_ms - max(r.request.created_at_ms for r in fills)) / DAY_MS
+        since = f"，最近成交 {days:.1f} 天前"
+    else:
+        since = "，从未成交"
+    return f"{symbol} 需 {move_pct:+.1f}% 回到 {edge:.4f}{since}"
 
 
 def _reconcile_line() -> str:

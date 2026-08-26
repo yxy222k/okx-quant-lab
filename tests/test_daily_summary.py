@@ -216,3 +216,74 @@ class PaperLineTest(_PatchMixin):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IdleGridNoteTest(unittest.TestCase):
+    """A long-only grid holding nothing, with price outside its range, can
+    never fill again — the condition behind '为什么这两天没成交' (2026-08-26)."""
+
+    def _state(self, holdings, levels=None):
+        import daily_summary  # noqa: F401  (ensures sys.path is set up)
+        from okx_quant_lab.demo_grid import DemoGridConfig, new_demo_grid_state
+        from dataclasses import replace
+
+        base = new_demo_grid_state(
+            DemoGridConfig(inst_id="SOL-USDT", range_pct=10.0, grid_count=4), 100.0
+        )
+        return replace(base, holdings=list(holdings), levels=levels or base.levels)
+
+    def _note(self, *args, **kwargs):
+        import daily_summary
+
+        return daily_summary._idle_grid_note(*args, **kwargs)
+
+    def test_above_range_and_empty_is_flagged_with_the_move_needed(self) -> None:
+        state = self._state([0.0, 0.0, 0.0, 0.0], levels=[90.0, 95.0, 100.0, 105.0, 110.0])
+        note = self._note("SOL-USDT", state, 121.0, [], 1_000_000)
+
+        self.assertIsNotNone(note)
+        self.assertIn("SOL", note)
+        self.assertIn("-9.1%", note)  # 110 / 121 - 1
+        self.assertIn("从未成交", note)
+
+    def test_below_range_and_empty_is_flagged_toward_the_lower_edge(self) -> None:
+        state = self._state([0.0] * 4, levels=[90.0, 95.0, 100.0, 105.0, 110.0])
+        note = self._note("SOL-USDT", state, 45.0, [], 1_000_000)
+
+        self.assertIn("+100.0%", note)  # 90 / 45 - 1
+        self.assertIn("90.0000", note)
+
+    def test_holding_inventory_is_never_idle(self) -> None:
+        state = self._state([0.0, 1.0, 0.0, 0.0], levels=[90.0, 95.0, 100.0, 105.0, 110.0])
+        self.assertIsNone(self._note("SOL-USDT", state, 121.0, [], 1_000_000))
+
+    def test_price_inside_range_is_never_idle(self) -> None:
+        state = self._state([0.0] * 4, levels=[90.0, 95.0, 100.0, 105.0, 110.0])
+        self.assertIsNone(self._note("SOL-USDT", state, 99.0, [], 1_000_000))
+
+    def test_days_since_last_fill_uses_the_newest_fill(self) -> None:
+        from okx_quant_lab.demo_execution import DemoOrderRecord
+        from okx_quant_lab.dry_run import OrderRequest
+
+        def record(status, created_at_ms):
+            return DemoOrderRecord(
+                request=OrderRequest(
+                    client_order_id=f"x{created_at_ms}", inst_id="SOL-USDT", side="SELL",
+                    quote_amount_usdt=0.0, base_quantity=1.0, reference_price=100.0,
+                    created_at_ms=created_at_ms, reason="test",
+                ),
+                status=status, exchange_order_id="", exchange_client_order_id="",
+                fill_price=100.0, fill_quantity=1.0, fee=0.0, fee_currency="", message="",
+            )
+
+        day = 86_400_000
+        now = 10 * day
+        records = [
+            record("FILLED", 3 * day),
+            record("FILLED", 6 * day),   # newest FILL -> 4.0 days ago
+            record("CANCELED", 9 * day),  # not a fill, must be ignored
+        ]
+        state = self._state([0.0] * 4, levels=[90.0, 95.0, 100.0, 105.0, 110.0])
+        note = self._note("SOL-USDT", state, 121.0, records, now)
+
+        self.assertIn("4.0 天前", note)
