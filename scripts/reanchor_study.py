@@ -7,6 +7,12 @@ several rules over multi-year history and splits the result by regime, because
 a single window answers the wrong question: run over one bear year, a
 loss-cutting rule looks like genius.
 
+Scoring is the median difference against never-re-anchoring, plus the share of
+windows where a rule changed nothing at all. An earlier version counted "share
+of windows beaten", which silently punished the rules that matter most: a rule
+that simply does not fire ties the baseline, and a strict > comparison scores
+that identically to losing. Ties are the whole point of a selective rule.
+
 The segment mechanics are asserted against run_grid_backtest before any
 numbers are reported, so this is the tested engine with re-anchoring on top.
 
@@ -47,8 +53,15 @@ RULES = {
 }
 
 
-def simulate(candles, rule, alloc=ALLOCATION):
-    """Chain grid deployments, re-anchoring at the current price when rule fires."""
+def simulate(candles, rule, alloc=ALLOCATION, close_confirmed=False):
+    """Chain grid deployments, re-anchoring at the current price when rule fires.
+
+    close_confirmed=True switches to the LIVE demo_grid semantics — a slot acts
+    only when a candle CLOSES beyond its level, filling at that close with a
+    market order — instead of the optimistic intrabar limit model the research
+    backtests use. The rule ranking holds under both, which is the point of
+    having the switch.
+    """
     equity, curve, anchors, trips = alloc, [], 0, 0
     index = 0
     while index < len(candles):
@@ -63,15 +76,19 @@ def simulate(candles, rule, alloc=ALLOCATION):
 
         while cursor < len(candles):
             candle = candles[cursor]
+            trigger_high = candle.close if close_confirmed else candle.high
+            trigger_low = candle.close if close_confirmed else candle.low
             for k in range(SLOTS):  # sells first: a slot bought here can't also sell
-                if holdings[k] > 0 and candle.high >= levels[k + 1]:
-                    gross = holdings[k] * levels[k + 1]
+                if holdings[k] > 0 and trigger_high >= levels[k + 1]:
+                    price = candle.close if close_confirmed else levels[k + 1]
+                    gross = holdings[k] * price
                     cash += gross - gross * FEE
                     holdings[k] = 0.0
                     trips += 1
             for k in range(SLOTS):
-                if armed[k] and holdings[k] == 0 and candle.low <= levels[k] and cash >= slot_cash:
-                    holdings[k] = (slot_cash - slot_cash * FEE) / levels[k]
+                if armed[k] and holdings[k] == 0 and trigger_low <= levels[k] and cash >= slot_cash:
+                    price = candle.close if close_confirmed else levels[k]
+                    holdings[k] = (slot_cash - slot_cash * FEE) / price
                     cash -= slot_cash
                     armed[k] = False
             for k in range(SLOTS):
@@ -148,24 +165,27 @@ def main() -> int:
     total = len(regimes)
     print(f"rolling 90d windows, {total} across {len(MARKETS)} markets "
           f"(bull {regimes.count('bull')} / range {regimes.count('range')} / bear {regimes.count('bear')})")
-    header = f"{'rule':<14} {'median':>8} {'mean':>8} {'worst':>8}" + "".join(
-        f"{tag + ' beat%':>14}" for tag in ("bull", "range", "bear")
-    )
+    header = f"{'rule':<14} {'median':>8}" + "".join(
+        f"{tag + ' delta/tie':>20}" for tag in ("bull", "range", "bear")
+    ) + f"{'mean delta':>12}"
     print(header)
     print("-" * len(header))
     for name in RULES:
         row = results[name]
-        line = f"{name:<14} {statistics.median(row):>+8.2f} {statistics.mean(row):>+8.2f} {min(row):>+8.1f}"
+        line = f"{name:<14} {statistics.median(row):>+8.2f}"
         for tag in ("bull", "range", "bear"):
             idx = [i for i, r in enumerate(regimes) if r == tag]
-            beat = sum(1 for i in idx if row[i] > results["never"][i]) / len(idx) * 100
-            line += f"{beat:>13.1f}%"
+            delta = [row[i] - results["never"][i] for i in idx]
+            ties = sum(1 for d in delta if abs(d) < 1e-9) / len(idx) * 100
+            line += f"{statistics.median(delta):>+14.2f}/{ties:>4.0f}%"
+        line += f"{statistics.mean([a - b for a, b in zip(row, results['never'])]):>+12.2f}"
         print(line)
 
     print()
-    print("'beat%' is the share of windows where the rule beat never-re-anchoring.")
-    print("Read the regime columns, not the median: no rule wins everywhere, and a")
-    print("rule tested on one regime only tells you about that regime.")
+    print("delta = median percentage points against never-re-anchoring in that regime;")
+    print("tie = share of windows the rule left untouched (it never fired). A rule that")
+    print("ties in a regime costs nothing there — that is very different from losing,")
+    print("and it is what makes a selective rule worth more than an aggressive one.")
     return 0
 
 

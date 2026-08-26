@@ -457,46 +457,52 @@ that filled normally once the venue recovered.
 
 ### How to re-anchor (measured, 2026-08-26)
 
-`scripts/reanchor_study.py` chains grid deployments under eight re-anchor rules
-over three years of hourly data (2023-08 .. 2026-08, 102 rolling 90-day windows:
-42 bull, 24 ranging, 36 bear) and splits the result by regime. Its segment
-mechanics are asserted equal to `run_grid_backtest` before it reports anything.
+`scripts/reanchor_study.py` chains grid deployments under several re-anchor
+rules over three years of hourly data and splits 102 rolling 90-day windows by
+regime. Its segment mechanics are asserted equal to `run_grid_backtest` first,
+and it can run either the intrabar limit model or the live close-confirmed one.
 
-| rule | median | bull beat% | range beat% | bear beat% |
-|------|--------|-----------|-------------|-----------|
-| never re-anchor | +2.25% | — | — | — |
-| every 7d | +0.10% | 40.5% | 4.2% | 88.9% |
-| exit range, act now | -0.88% | 69.0% | 4.2% | 77.8% |
-| **exit range 1d, both ways** | -0.03% | **85.7%** | 4.2% | **77.8%** |
-| exit range 3d | +1.64% | 83.3% | 0.0% | 66.7% |
-| up-only 1d | +4.91% | **92.9%** | 0.0% | **0.0%** |
-| down-only 1d | +0.96% | **0.0%** | 4.2% | **88.9%** |
+Scores are median percentage points against never-re-anchoring, with the share
+of windows the rule never fired in ("tie"). Ties matter: a rule that does not
+fire costs nothing, which is a completely different outcome from losing.
 
-"beat%" is the share of windows the rule beat never-re-anchoring in that regime.
+| rule | bull Δ / tie | range Δ / tie | bear Δ / tie | mean Δ |
+|------|--------------|---------------|--------------|--------|
+| every 7d | -0.24 / 0% | -6.01 / 0% | +5.95 / 0% | +0.91 |
+| exit range, act now | +3.28 / 0% | -8.30 / 8% | +2.18 / 0% | +0.38 |
+| exit range 1d, both ways | +2.95 / 0% | **-7.87** / 25% | +4.88 / 3% | +1.74 |
+| exit range 3d | +3.10 / 0% | -4.91 / 42% | +2.99 / 3% | +1.31 |
+| **up-only 1d** | **+3.83** / 0% | **0.00 / 75%** | **0.00 / 94%** | **+2.17** |
+| down-only 1d | 0.00 / 95% | -2.67 / 42% | +5.25 / 3% | +0.79 |
 
-- **Up-only and down-only are each half a strategy.** Re-anchoring after a top
-  exit wins 92.9% of bull windows and is worthless anywhere else; re-anchoring
-  after a bottom exit wins 88.9% of bear windows and loses every bull window.
-  They are blind in opposite directions, so the only rule that beats the
-  baseline in *both* trending regimes is the two-sided one.
-- **One day of confirmation beats acting immediately** (85.7% vs 69.0% in bull):
-  it filters brief pokes outside the range that mean-revert. Three days starts
-  giving the edge back.
-- **In ranging markets every rule loses to doing nothing** (0-4.2% beat rate,
-  about -3pp median). That is the premium: re-anchoring interrupts the grid
-  doing exactly what it was built for, and pays fees to do it.
+- **The selective rule wins because it abstains.** Re-anchoring only after a top
+  exit gains +3.83pp in bull windows and never fires in 75-94% of the others, so
+  it does no damage there. That beats every aggressive rule on mean Δ despite
+  acting far less often.
+- **Two-sided re-anchoring is expensive in ranges: -7.87pp median.** It gains in
+  both trends (+2.95 bull, +4.88 bear) and gives most of it back to churn when
+  price chops in and out of the range. Ranging windows were 24 of 102 here.
 - **Down-side re-anchoring is a stop-loss wearing a costume.** It liquidates
-  trapped inventory at a loss and redeploys lower. That is where its bear-market
-  edge comes from, and it must be adopted with eyes open.
-- The rules were compared on one shared sample, so treat the ordering as
-  directional, not precise. The regime asymmetry is a mechanism (a grid that
-  re-centres keeps earning; one that does not goes idle or holds a bag), which
-  is why it is more trustworthy than the exact percentages. Untested and worth
-  testing next: gating the rule on a trend filter to skip the ranging cost.
+  trapped inventory at a loss and redeploys lower; that is the entire source of
+  its +5.25pp bear edge, and it must be adopted with eyes open.
+- **A trend filter helps in-sample and did not survive out-of-sample.** Gating
+  the two-sided rule on Kaufman efficiency ratio >= 0.20 cut the ranging cost
+  from -8.08 to -2.83 across five markets, but on a chronological dev/holdout
+  split the best-on-dev rule fell from +3.52 to +0.06 mean Δ while the plain
+  two-sided rule held at +0.21 -> +0.41. Treat filter thresholds as unproven.
+- **Live execution does not change the ranking.** Re-run with close-confirmed
+  market fills (what the bot actually gets) the ordering is unchanged and the
+  rules score slightly *better*, so none of this is an artifact of the
+  optimistic intrabar fill model.
+- **Everything shrinks out of sample.** These are small edges measured on
+  overlapping windows from one asset class over three years, with several rules
+  compared on the same sample. The regime asymmetry is a mechanism (a grid that
+  re-centres keeps earning; one that does not goes idle or holds a bag) and is
+  worth more than the exact numbers.
 
-A one-year test of the same rules ranked "every 7d" first and made the two-sided
-exit rule look mediocre — that year was a bear market in all three names. The
-three-year split reversed it. Do not tune this on one regime.
+A one-year test of the same rules ranked "every 7d" first and made the selective
+rule look mediocre — that year was a bear market in all three names. Do not tune
+this on one regime.
 
 **Decision (2026-08-26): the grids were deliberately NOT re-anchored.** Nothing
 about the current price argues it is a good place to rebuild a range, and
