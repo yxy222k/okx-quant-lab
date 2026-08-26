@@ -457,52 +457,62 @@ that filled normally once the venue recovered.
 
 ### How to re-anchor (measured, 2026-08-26)
 
-`scripts/reanchor_study.py` chains grid deployments under several re-anchor
-rules over three years of hourly data and splits 102 rolling 90-day windows by
-regime. Its segment mechanics are asserted equal to `run_grid_backtest` first,
-and it can run either the intrabar limit model or the live close-confirmed one.
+Two scripts. `reanchor_study.py` chains grid deployments under several rules
+over three years of hourly data across ten markets and splits 340 rolling
+90-day windows by regime; `reanchor_significance.py` re-runs it on
+non-overlapping windows with a sign test and a date-block bootstrap, because
+overlapping windows and ten correlated crypto markets both inflate "n". The
+segment mechanics are asserted equal to `run_grid_backtest`, and both can run
+the live close-confirmed model as well as the research intrabar one.
 
-Scores are median percentage points against never-re-anchoring, with the share
-of windows the rule never fired in ("tie"). Ties matter: a rule that does not
-fire costs nothing, which is a completely different outcome from losing.
+Δ is median percentage points against never-re-anchoring; "tie" is the share of
+windows the rule never fired in. Ten markets, 340 windows (123 bull / 92 range
+/ 125 bear), intrabar fills:
 
 | rule | bull Δ / tie | range Δ / tie | bear Δ / tie | mean Δ |
 |------|--------------|---------------|--------------|--------|
-| every 7d | -0.24 / 0% | -6.01 / 0% | +5.95 / 0% | +0.91 |
-| exit range, act now | +3.28 / 0% | -8.30 / 8% | +2.18 / 0% | +0.38 |
-| exit range 1d, both ways | +2.95 / 0% | **-7.87** / 25% | +4.88 / 3% | +1.74 |
-| exit range 3d | +3.10 / 0% | -4.91 / 42% | +2.99 / 3% | +1.31 |
-| **up-only 1d** | **+3.83** / 0% | **0.00 / 75%** | **0.00 / 94%** | **+2.17** |
-| down-only 1d | 0.00 / 95% | -2.67 / 42% | +5.25 / 3% | +0.79 |
+| every 7d | -1.32 / 0% | -6.39 / 0% | +7.12 / 0% | -0.02 |
+| exit range 1d, both ways | +2.55 / 0% | -7.52 / 23% | +4.12 / 1% | -0.02 |
+| exit range 3d | +2.50 / 0% | -5.09 / 34% | +2.70 / 2% | +1.10 |
+| **up-only 1d** | **+4.29** / 0% | **0.00 / 57%** | **0.00 / 89%** | **+1.27** |
+| down-only 1d | 0.00 / 93% | 0.00 / 52% | +4.97 / 1% | +0.12 |
 
-- **The selective rule wins because it abstains.** Re-anchoring only after a top
-  exit gains +3.83pp in bull windows and never fires in 75-94% of the others, so
-  it does no damage there. That beats every aggressive rule on mean Δ despite
-  acting far less often.
-- **Two-sided re-anchoring is expensive in ranges: -7.87pp median.** It gains in
-  both trends (+2.95 bull, +4.88 bear) and gives most of it back to churn when
-  price chops in and out of the range. Ranging windows were 24 of 102 here.
-- **Down-side re-anchoring is a stop-loss wearing a costume.** It liquidates
-  trapped inventory at a loss and redeploys lower; that is the entire source of
-  its +5.25pp bear edge, and it must be adopted with eyes open.
-- **A trend filter helps in-sample and did not survive out-of-sample.** Gating
-  the two-sided rule on Kaufman efficiency ratio >= 0.20 cut the ranging cost
-  from -8.08 to -2.83 across five markets, but on a chronological dev/holdout
-  split the best-on-dev rule fell from +3.52 to +0.06 mean Δ while the plain
-  two-sided rule held at +0.21 -> +0.41. Treat filter thresholds as unproven.
-- **Live execution does not change the ranking.** Re-run with close-confirmed
-  market fills (what the bot actually gets) the ordering is unchanged and the
-  rules score slightly *better*, so none of this is an artifact of the
-  optimistic intrabar fill model.
-- **Everything shrinks out of sample.** These are small edges measured on
-  overlapping windows from one asset class over three years, with several rules
-  compared on the same sample. The regime asymmetry is a mechanism (a grid that
-  re-centres keeps earning; one that does not goes idle or holds a bag) and is
-  worth more than the exact numbers.
+Significance on 120 non-overlapping windows:
 
-A one-year test of the same rules ranked "every 7d" first and made the selective
-rule look mediocre — that year was a bear market in all three names. Do not tune
-this on one regime.
+| rule | help/hurt/tie | sign test p | bootstrap 95% CI of mean Δ |
+|------|---------------|-------------|----------------------------|
+| exit 1d, both ways | 62 / 47 / 11 | 0.180 | [-4.36, +2.23] |
+| **up-only 1d** | **45 / 18 / 57** | **0.001** | **[-0.57, +2.50]** |
+| down-only 1d | 32 / 29 / 59 | 0.798 | [-3.95, +1.98] |
+| every 7d | 53 / 67 / 0 | 0.235 | [-5.59, +2.04] |
+
+- **Only the selective rule has evidence behind it, and only for its
+  direction.** Re-anchor after a top exit and it helps 45 windows to 18
+  (p=0.001) — but the bootstrap CI on the average effect still spans zero.
+  The sign test counts windows; the bootstrap counts independent time periods,
+  and three years of correlated crypto contains very few of those.
+- **So treat it as a liveness rule, not a profit rule.** The demo phase did not
+  fail on return (+2.36%, -0.91% drawdown) — it failed by ceasing to exist. Up
+  only re-anchoring is the cheapest fix for that, and the evidence says it
+  probably does not cost anything. It does not say it earns anything.
+- **Everything else is noise.** Two-sided, down-only and calendar rules all sit
+  at p >= 0.18 with CIs spanning ±4pp. The two-sided rule looked strong on
+  three markets (mean Δ +1.74) and fell to -0.02 across ten — a sample-size
+  lesson, not a market-regime one.
+- **Down-side re-anchoring is a stop-loss wearing a costume.** Its bear-regime
+  +4.97pp comes entirely from liquidating trapped inventory at a loss and
+  redeploying lower. Adopt that as a risk decision, not a parameter.
+- **Out of sample everything decays.** On a chronological dev/holdout split the
+  best-on-dev rule fell from +2.48 to +0.06 mean Δ. Trend filters (Kaufman
+  efficiency ratio, 30-day momentum) cut the ranging cost in-sample and did not
+  survive that split either.
+- **Live execution does not change the ranking.** Under close-confirmed market
+  fills every rule scores slightly better, so none of this is an artifact of
+  the optimistic intrabar model.
+
+A one-year test of the same rules ranked "every 7d" first — that year was a
+bear market in all three names then tested. Do not tune this on one regime, or
+on one handful of markets.
 
 **Decision (2026-08-26): the grids were deliberately NOT re-anchored.** Nothing
 about the current price argues it is a good place to rebuild a range, and
