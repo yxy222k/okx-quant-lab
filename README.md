@@ -410,6 +410,56 @@ hermes cron remove okx-quant-hourly-update  # delete the job
 
 The schedule only moves paper state built from public data. Nothing in this loop can submit an order.
 
+## Demo Phase Findings (2026-07-11 .. 2026-08-26)
+
+Three grids ran on OKX demo for 46 days: 100 USDT each, 20 slots x 5 USDT,
+±15% around the deploy price, close-confirmed on 15m bars. Numbers below are
+reconstructed by replaying the order ledger against the candle files, and they
+reproduce the live book to within a cent (307.09 vs 307.06, the difference
+being ticker vs candle-close marking).
+
+| market | round trips | grid return | max drawdown | buy & hold |
+|--------|-------------|-------------|--------------|------------|
+| BTC    | 18          | +1.86%      | -0.60%       | +21.67%    |
+| ETH    | 25          | +2.57%      | -0.98%       | +36.03%    |
+| SOL    | 26          | +2.66%      | -1.33%       | +23.42%    |
+| total  | 69          | **+2.36%**  | **-0.91%**   | **~+27%**  |
+
+**The grid converted a ~27% directional move into ~2.4% of round-trip crumbs,
+then stopped.** Price walked up through every level, the grids sold their
+inventory slot by slot on the way, and by 2026-08-19/21 all three were 100% in
+cash with price above the top of their range — BTC by 5.8%, ETH by 18.2%, SOL
+by 7.4%. Not a single order has been submitted since. Every buy has a matching
+sell (18/18, 25/25, 26/26): nothing is trapped, the strategy simply finished.
+
+What this says about the design:
+
+- **A fixed-range long-only grid has a lifecycle bounded by its range, not by
+  time.** Once price leaves the top and inventory is gone, the strategy is
+  structurally finished — armed slots wait for a buy trigger 6-18% below the
+  market. Re-anchoring is not a tuning knob, it is a missing component.
+- **The drawdown figure flatters it.** -0.91% peak-to-trough looks excellent
+  against the <8% upgrade gate, but it mostly measures how little the strategy
+  was exposed. Cash has no drawdown.
+- **"Run it for 8-12 weeks" assumed it would be trading.** At 6.6 weeks the
+  grid went flat; the remaining weeks would add calendar time and no
+  information. Duration gates should count *active* time, not wall-clock.
+- **Idleness needs its own alarm.** Both watchdogs were silent for six days
+  because above-range-in-cash is not a risk condition. `daily_summary` now
+  flags a grid holding nothing while price sits outside its range.
+
+Operationally the phase was clean: no double fills, no lost audit records, no
+breaker trips. The two things that did happen were handled and are documented
+under Known Minor Limitations — OKX demo cancelled some market orders on its
+thin book (`CANCELED` in the ledger, retried on the next candle), and a
+75-minute OKX outage on 2026-08-20 produced five `ERROR` rows on one BTC sell
+that filled normally once the venue recovered.
+
+**Decision (2026-08-26): the grids were deliberately NOT re-anchored.** Nothing
+about the current price argues it is a good place to rebuild a range, and
+re-deploying after a 27% run is how a grid buys a top. The idle state is left
+in place as the phase result.
+
 ## Known Minor Limitations
 
 > Since 2026-08-13 this project is under git. Fixes are recorded in the commit
