@@ -455,6 +455,49 @@ thin book (`CANCELED` in the ledger, retried on the next candle), and a
 75-minute OKX outage on 2026-08-20 produced five `ERROR` rows on one BTC sell
 that filled normally once the venue recovered.
 
+### How to re-anchor (measured, 2026-08-26)
+
+`scripts/reanchor_study.py` chains grid deployments under eight re-anchor rules
+over three years of hourly data (2023-08 .. 2026-08, 102 rolling 90-day windows:
+42 bull, 24 ranging, 36 bear) and splits the result by regime. Its segment
+mechanics are asserted equal to `run_grid_backtest` before it reports anything.
+
+| rule | median | bull beat% | range beat% | bear beat% |
+|------|--------|-----------|-------------|-----------|
+| never re-anchor | +2.25% | — | — | — |
+| every 7d | +0.10% | 40.5% | 4.2% | 88.9% |
+| exit range, act now | -0.88% | 69.0% | 4.2% | 77.8% |
+| **exit range 1d, both ways** | -0.03% | **85.7%** | 4.2% | **77.8%** |
+| exit range 3d | +1.64% | 83.3% | 0.0% | 66.7% |
+| up-only 1d | +4.91% | **92.9%** | 0.0% | **0.0%** |
+| down-only 1d | +0.96% | **0.0%** | 4.2% | **88.9%** |
+
+"beat%" is the share of windows the rule beat never-re-anchoring in that regime.
+
+- **Up-only and down-only are each half a strategy.** Re-anchoring after a top
+  exit wins 92.9% of bull windows and is worthless anywhere else; re-anchoring
+  after a bottom exit wins 88.9% of bear windows and loses every bull window.
+  They are blind in opposite directions, so the only rule that beats the
+  baseline in *both* trending regimes is the two-sided one.
+- **One day of confirmation beats acting immediately** (85.7% vs 69.0% in bull):
+  it filters brief pokes outside the range that mean-revert. Three days starts
+  giving the edge back.
+- **In ranging markets every rule loses to doing nothing** (0-4.2% beat rate,
+  about -3pp median). That is the premium: re-anchoring interrupts the grid
+  doing exactly what it was built for, and pays fees to do it.
+- **Down-side re-anchoring is a stop-loss wearing a costume.** It liquidates
+  trapped inventory at a loss and redeploys lower. That is where its bear-market
+  edge comes from, and it must be adopted with eyes open.
+- The rules were compared on one shared sample, so treat the ordering as
+  directional, not precise. The regime asymmetry is a mechanism (a grid that
+  re-centres keeps earning; one that does not goes idle or holds a bag), which
+  is why it is more trustworthy than the exact percentages. Untested and worth
+  testing next: gating the rule on a trend filter to skip the ranging cost.
+
+A one-year test of the same rules ranked "every 7d" first and made the two-sided
+exit rule look mediocre — that year was a bear market in all three names. The
+three-year split reversed it. Do not tune this on one regime.
+
 **Decision (2026-08-26): the grids were deliberately NOT re-anchored.** Nothing
 about the current price argues it is a good place to rebuild a range, and
 re-deploying after a 27% run is how a grid buys a top. The idle state is left
