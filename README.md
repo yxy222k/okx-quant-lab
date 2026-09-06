@@ -528,10 +528,20 @@ exit-1d at mean Δ +1.74 where ten markets show -0.02. Sample size and regime
 mix flip the ordering; treat any grid-rule study smaller than this with
 suspicion.
 
-**Decision (2026-08-26): the grids were deliberately NOT re-anchored.** Nothing
-about the current price argues it is a good place to rebuild a range, and
-re-deploying after a 27% run is how a grid buys a top. The idle state is left
-in place as the phase result.
+**Decision (2026-08-26): the grids were deliberately NOT re-anchored**, and the
+idle state stood as the phase-1 result for eleven days.
+
+**Decision (2026-09-06): the operator re-anchored manually — demo phase 2.**
+The three phase-1 states were archived (timestamped `.retired.*` files, zero
+orders — all books were flat) and the next cron cycle deployed fresh grids at
+the then-current prices with the unchanged config (100 USDT, 20 slots, ±15%,
+close-confirmed, 3%/day breaker). Phase-1 profits (~+7 USDT) stay in the demo
+account but outside the new books, so phase 2 starts from a clean 100 per
+market. This was a manual liveness decision; no automatic re-anchor rule was
+installed, consistent with the study above finding no rule distinguishable
+from noise. The event-study note stands: deploying after a run-up has not
+historically lost money outright — it is merely the moment a grid most lags
+simply holding.
 
 ## Known Minor Limitations
 
