@@ -53,6 +53,11 @@ def replay_market(inst_id: str) -> dict | None:
     total_filled = partial_count = 0
     if ledger_path.exists():
         for record in load_demo_order_ledger(ledger_path):
+            # The ledger spans every deployment; only records from the CURRENT
+            # one belong in this replay — after a re-anchor, earlier phases'
+            # fills are legitimately outside the window, not "missing".
+            if record.request.created_at_ms < state.deploy_timestamp_ms:
+                continue
             if record.status == "FILLED":
                 total_filled += 1
                 fills_by_ts.setdefault(record.request.created_at_ms, []).append(record)
