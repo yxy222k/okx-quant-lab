@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 from pathlib import Path
 import time
@@ -24,6 +24,13 @@ _ORDER_NOT_FOUND_CODE = "51603"
 # Seams for tests: probe grace and 429 backoff go through these.
 _SLEEP = time.sleep
 _PROBE_GRACE_SECONDS = 1.0
+# Re-query backoff while a just-placed order is still working. Demo market
+# orders usually fill within milliseconds, but one ETH buy (2026-09-23) filled
+# 10.1 s after create; a single immediate query booked it SUBMITTED and the
+# grid never recorded the fill. ~15 s total, then refresh_submitted() on the
+# next run picks up anything slower.
+_FILL_POLL_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0)
+_TERMINAL_STATES = {"filled", "canceled", "mmp_canceled"}
 
 
 @dataclass(frozen=True)
@@ -161,6 +168,16 @@ class DemoOrderExecutor:
 
         order_id = result["ordId"]
         details = self._fetch_order_details(request.inst_id, order_id)
+        for delay in _FILL_POLL_DELAYS:
+            if details.get("state", "") in _TERMINAL_STATES:
+                break
+            _SLEEP(delay)
+            try:
+                details = self._fetch_order_details(request.inst_id, order_id)
+            except (RuntimeError, OSError, ValueError):
+                # The order is placed; a failed re-query must not turn it into
+                # ERROR. Keep the last answer (SUBMITTED) for refresh_submitted.
+                break
         state = details.get("state", "")
         fill_quantity = float(details.get("accFillSz") or 0)
         status, note = _order_status(state, fill_quantity)
@@ -175,6 +192,44 @@ class DemoOrderExecutor:
             fee_currency=details.get("feeCcy", ""),
             message=f"demo order state={state or 'unknown'}{note}",
         )
+
+    def refresh_submitted(self) -> list[tuple[DemoOrderRecord, DemoOrderRecord]]:
+        """Re-query every SUBMITTED record; replace those now terminal in place.
+
+        Returns (old, new) pairs so the caller can book late fills into its
+        grid state. Does NOT call on_record: the caller must persist its state
+        first and the ledger second, so a crash in between re-resolves the
+        order next run instead of losing the fill (apply_late_fill refuses to
+        book into a slot that is already occupied / already empty).
+        """
+        resolved = []
+        for index, record in enumerate(self._records):
+            if record.status != "SUBMITTED" or not record.exchange_order_id:
+                continue
+            try:
+                details = self._fetch_order_details(
+                    record.request.inst_id, record.exchange_order_id
+                )
+            except (RuntimeError, OSError, ValueError):
+                continue  # still unknown; try again next run
+            state = details.get("state", "")
+            fill_quantity = float(details.get("accFillSz") or 0)
+            status, note = _order_status(state, fill_quantity)
+            if status == "SUBMITTED":
+                continue
+            new = replace(
+                record,
+                status=status,
+                fill_price=float(details.get("avgPx") or 0),
+                fill_quantity=fill_quantity,
+                fee=float(details.get("fee") or 0),
+                fee_currency=details.get("feeCcy", ""),
+                message=f"{record.message}; resolved to state={state} on a later run{note}",
+            )
+            self._records[index] = new
+            self._by_client_order_id[new.request.client_order_id] = new
+            resolved.append((record, new))
+        return resolved
 
     def _post_order_idempotent(self, inst_id: str, body: dict, attempts: int = 3) -> dict:
         """Submit the order; never a blind retry, never resubmit after an

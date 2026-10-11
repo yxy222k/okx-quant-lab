@@ -15,7 +15,12 @@ if str(SCRIPTS) not in sys.path:
 
 import lesson_28_demo_grid_loop as loop_mod
 
-from okx_quant_lab.demo_execution import load_demo_order_ledger
+from okx_quant_lab.demo_execution import (
+    DemoOrderRecord,
+    load_demo_order_ledger,
+    save_demo_order_ledger,
+)
+from okx_quant_lab.dry_run import OrderRequest
 from okx_quant_lab.demo_grid import DemoGridConfig, load_demo_grid_state
 from okx_quant_lab.okx_demo_private import DemoCredentials
 from okx_quant_lab.okx_public import Candle, InstrumentSpec
@@ -287,6 +292,58 @@ class RunMarketTest(unittest.TestCase):
         records = load_demo_order_ledger(self.tmp / "BTC-USDT_ledger.json")
         self.assertEqual(len(records), 10)
         self.assertTrue(all(record.status == "BLOCKED" for record in records))
+
+    def _seed_submitted(self, created_at_ms: int) -> None:
+        save_demo_order_ledger(self.tmp / "BTC-USDT_ledger.json", [DemoOrderRecord(
+            request=OrderRequest(
+                client_order_id=f"demogrid:BTC-USDT:{created_at_ms}:BUY:L9",
+                inst_id="BTC-USDT", side="BUY", quote_amount_usdt=5.0,
+                base_quantity=0.0, reference_price=98.0,
+                created_at_ms=created_at_ms, reason="test",
+            ),
+            status="SUBMITTED", exchange_order_id="ord-late",
+            exchange_client_order_id="cl", fill_price=0.0, fill_quantity=0.0,
+            fee=0.0, fee_currency="", message="demo order state=live",
+        )])
+        original_executor = self._originals["DemoOrderExecutor"]
+
+        def filled(credentials, method, path, body=None):
+            assert method == "GET" and "ordId=ord-late" in path, (method, path)
+            return {"code": "0", "data": [{"ordId": "ord-late", "state": "filled",
+                                           "avgPx": "98", "accFillSz": "0.051",
+                                           "fee": "-0.000051", "feeCcy": "BTC"}]}
+
+        loop_mod.DemoOrderExecutor = lambda *args, **kwargs: original_executor(
+            *args, **{**kwargs, "request_fn": filled}
+        )
+
+    def test_late_fill_is_booked_before_new_triggers(self) -> None:
+        self._run("BTC-USDT")
+        self._seed_submitted(TS)
+
+        lines, attention = self._run("BTC-USDT")
+
+        self.assertTrue(attention)
+        self.assertTrue(any("late BUY L9" in line and "booked" in line for line in lines))
+        state = load_demo_grid_state(self.tmp / "BTC-USDT_state.json")
+        self.assertAlmostEqual(state.cash, 95.0)
+        self.assertAlmostEqual(state.holdings[9], 0.051 - 0.000051)
+        self.assertFalse(state.armed[9])
+        records = load_demo_order_ledger(self.tmp / "BTC-USDT_ledger.json")
+        self.assertEqual([r.status for r in records], ["FILLED"])
+
+    def test_late_fill_from_an_earlier_deployment_leaves_state_alone(self) -> None:
+        self._run("BTC-USDT")
+        self._seed_submitted(TS - 10 * BAR_MS)
+
+        lines, _ = self._run("BTC-USDT")
+
+        self.assertTrue(any("earlier deployment" in line for line in lines))
+        state = load_demo_grid_state(self.tmp / "BTC-USDT_state.json")
+        self.assertEqual(state.cash, 100.0)
+        self.assertEqual(state.holdings, [0.0] * 20)
+        records = load_demo_order_ledger(self.tmp / "BTC-USDT_ledger.json")
+        self.assertEqual([r.status for r in records], ["FILLED"])
 
 
 if __name__ == "__main__":

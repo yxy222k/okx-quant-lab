@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -190,6 +190,57 @@ def advance_demo_grid(
         deploy_timestamp_ms=state.deploy_timestamp_ms,
     )
     return new_state, events
+
+
+def apply_late_fill(
+    state: DemoGridState,
+    config: DemoGridConfig,
+    record,
+    slot: int | None = None,
+) -> tuple[DemoGridState, str]:
+    """Book a fill the grid missed when the order was placed (it was SUBMITTED
+    then) exactly as advance_demo_grid would have booked it on the spot.
+
+    `slot` defaults to the one encoded in the client order id (":L<n>"). The
+    slot must still be in the state the order expected — empty for a BUY,
+    holding for a SELL; otherwise nothing is booked and the event says to
+    reconcile by hand. That check also makes a repeated call a no-op.
+    """
+    request = record.request
+    index = slot if slot is not None else int(request.client_order_id.rsplit(":L", 1)[1])
+    label = f"late {request.side} L{index} ({request.client_order_id})"
+    if record.status != "FILLED":
+        return state, f"{label} resolved {record.status}: nothing to book"
+
+    base_currency, quote_currency = config.inst_id.split("-")
+    cash = state.cash
+    holdings = list(state.holdings)
+    armed = list(state.armed)
+    realized_profit = state.realized_profit
+    if request.side == "BUY":
+        if holdings[index] > 0:
+            return state, (f"{label} FILLED but slot already holds {holdings[index]:.8f} "
+                           "-- NOT booked, reconcile manually")
+        cash -= config.slot_cash
+        holdings[index] = record.fill_quantity + (
+            record.fee if record.fee_currency == base_currency else 0.0
+        )
+        armed[index] = False
+    else:
+        if holdings[index] == 0:
+            return state, f"{label} FILLED but slot is empty -- NOT booked, reconcile manually"
+        proceeds = record.fill_quantity * record.fill_price + (
+            record.fee if record.fee_currency == quote_currency else 0.0
+        )
+        cash += proceeds
+        realized_profit += proceeds - config.slot_cash
+        holdings[index] = 0.0
+
+    new_state = replace(
+        state, cash=cash, holdings=holdings, armed=armed, realized_profit=realized_profit
+    )
+    return new_state, (f"{label} booked: fill={record.fill_price:.4f} "
+                       f"qty={record.fill_quantity:.8f}")
 
 
 def demo_grid_equity(state: DemoGridState, mark_price: float) -> float:

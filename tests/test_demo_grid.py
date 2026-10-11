@@ -10,10 +10,12 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from okx_quant_lab.demo_execution import DemoExecutionLimits, DemoOrderExecutor
+from okx_quant_lab.demo_execution import DemoExecutionLimits, DemoOrderExecutor, DemoOrderRecord
+from okx_quant_lab.dry_run import OrderRequest
 from okx_quant_lab.demo_grid import (
     DemoGridConfig,
     advance_demo_grid,
+    apply_late_fill,
     demo_grid_equity,
     load_demo_grid_state,
     new_demo_grid_state,
@@ -265,3 +267,75 @@ class DemoGridTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _late_record(side: str, slot: int, status: str = "FILLED") -> DemoOrderRecord:
+    return DemoOrderRecord(
+        request=OrderRequest(
+            client_order_id=f"demogrid:SOL-USDT:1699920000000:{side}:L{slot}",
+            inst_id="SOL-USDT", side=side,
+            quote_amount_usdt=25.0 if side == "BUY" else 0.0,
+            base_quantity=0.26 if side == "SELL" else 0.0,
+            reference_price=94.0, created_at_ms=1_699_920_000_000, reason="test",
+        ),
+        status=status, exchange_order_id="ord", exchange_client_order_id="cl",
+        fill_price=94.0 if side == "BUY" else 101.0,
+        fill_quantity=0.266 if side == "BUY" else 0.26,
+        fee=-0.000266 if side == "BUY" else -0.02626,
+        fee_currency="SOL" if side == "BUY" else "USDT",
+        message="",
+    )
+
+
+class ApplyLateFillTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state = new_demo_grid_state(CONFIG, reference_price=100.0)
+
+    def test_late_buy_books_like_an_immediate_fill(self) -> None:
+        state, event = apply_late_fill(self.state, CONFIG, _late_record("BUY", 1))
+
+        self.assertAlmostEqual(state.cash, 100.0 - CONFIG.slot_cash)
+        self.assertAlmostEqual(state.holdings[1], 0.266 - 0.000266)
+        self.assertFalse(state.armed[1])
+        self.assertIn("booked", event)
+
+    def test_late_buy_into_an_occupied_slot_is_refused(self) -> None:
+        booked, _ = apply_late_fill(self.state, CONFIG, _late_record("BUY", 1))
+
+        again, event = apply_late_fill(booked, CONFIG, _late_record("BUY", 1))
+
+        self.assertEqual(again, booked)  # a repeat is a no-op
+        self.assertIn("NOT booked", event)
+
+    def test_slot_override_books_into_another_slot(self) -> None:
+        state, _ = apply_late_fill(self.state, CONFIG, _late_record("BUY", 1), slot=3)
+
+        self.assertEqual(state.holdings[1], 0.0)
+        self.assertGreater(state.holdings[3], 0.0)
+        self.assertFalse(state.armed[3])
+
+    def test_late_sell_realizes_against_slot_cash(self) -> None:
+        bought, _ = apply_late_fill(self.state, CONFIG, _late_record("BUY", 1))
+
+        sold, event = apply_late_fill(bought, CONFIG, _late_record("SELL", 1))
+
+        proceeds = 0.26 * 101.0 - 0.02626
+        self.assertEqual(sold.holdings[1], 0.0)
+        self.assertAlmostEqual(sold.cash, bought.cash + proceeds)
+        self.assertAlmostEqual(sold.realized_profit, proceeds - CONFIG.slot_cash)
+        self.assertIn("booked", event)
+
+    def test_late_sell_from_an_empty_slot_is_refused(self) -> None:
+        state, event = apply_late_fill(self.state, CONFIG, _late_record("SELL", 1))
+
+        self.assertEqual(state, self.state)
+        self.assertIn("NOT booked", event)
+
+    def test_non_filled_resolution_books_nothing(self) -> None:
+        for status in ("CANCELED", "PARTIAL"):
+            with self.subTest(status=status):
+                state, event = apply_late_fill(
+                    self.state, CONFIG, _late_record("BUY", 1, status=status)
+                )
+                self.assertEqual(state, self.state)
+                self.assertIn(status, event)

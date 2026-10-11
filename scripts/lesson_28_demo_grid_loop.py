@@ -34,6 +34,7 @@ from okx_quant_lab.demo_execution import (
 from okx_quant_lab.demo_grid import (
     DemoGridConfig,
     advance_demo_grid,
+    apply_late_fill,
     demo_grid_equity,
     load_demo_grid_state,
     new_demo_grid_state,
@@ -144,7 +145,26 @@ def _run_market(inst_id: str, credentials, confirmed: bool) -> tuple[list[str], 
     else:
         state = load_demo_grid_state(state_path(inst_id))
 
+    # Orders that were still working when placed: book any that have since
+    # filled BEFORE this run's triggers, or the slot would buy/sell twice.
+    late_events = []
+    resolved = executor.refresh_submitted()
+    for _, record in resolved:
+        if deployed_now or record.request.created_at_ms < state.deploy_timestamp_ms:
+            late_events.append(
+                f"{record.request.client_order_id} resolved {record.status} "
+                "(earlier deployment; state untouched)"
+            )
+            continue
+        state, event = apply_late_fill(state, config, record)
+        late_events.append(event)
+    if resolved:
+        # State first, ledger second: see DemoOrderExecutor.refresh_submitted.
+        save_demo_grid_state(state_path(inst_id), state)
+        save_demo_order_ledger(ledger_path(inst_id), executor.records)
+
     state, events = advance_demo_grid(candles, state, config, executor, spec, confirmed)
+    events = late_events + events
     save_demo_grid_state(state_path(inst_id), state)
     save_demo_order_ledger(ledger_path(inst_id), executor.records)
 

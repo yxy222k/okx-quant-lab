@@ -24,6 +24,20 @@ from okx_quant_lab.okx_demo_private import DemoCredentials, OkxApiError
 CREDENTIALS = DemoCredentials(api_key="k", secret_key="s", passphrase="p")
 
 
+def setUpModule() -> None:
+    # Orders a fake reports as still working are re-polled with backoff; no
+    # test here should spend real seconds in that loop.
+    import okx_quant_lab.demo_execution as mod
+    global _ORIGINAL_SLEEP
+    _ORIGINAL_SLEEP = mod._SLEEP
+    mod._SLEEP = lambda seconds: None
+
+
+def tearDownModule() -> None:
+    import okx_quant_lab.demo_execution as mod
+    mod._SLEEP = _ORIGINAL_SLEEP
+
+
 def _request(client_order_id: str = "test:1", side: str = "BUY") -> OrderRequest:
     return OrderRequest(
         client_order_id=client_order_id,
@@ -437,3 +451,104 @@ class DemoExecutorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _scripted_details(states: list) -> callable:
+    """POST succeeds; each order GET returns the next scripted state (the last
+    one repeats). An Exception instance in the script is raised instead."""
+    script = list(states)
+    calls = {"get": 0}
+
+    def request_fn(credentials, method, path, body=None):
+        if method == "POST":
+            return {"code": "0", "data": [{"sCode": "0", "ordId": "ord-late"}]}
+        calls["get"] += 1
+        step = script.pop(0) if len(script) > 1 else script[0]
+        if isinstance(step, Exception):
+            raise step
+        filled = "0.0985" if step == "filled" else "0"
+        return {"code": "0", "data": [{"ordId": "ord-late", "state": step, "avgPx": "101.5",
+                                       "accFillSz": filled, "fee": "-0.0000985",
+                                       "feeCcy": "SOL"}]}
+
+    request_fn.calls = calls
+    return request_fn
+
+
+class LateFillTest(unittest.TestCase):
+    """A market order can still be working when first queried (2026-09-23: an
+    ETH buy filled 10.1 s after create and was never booked)."""
+
+    def setUp(self) -> None:
+        import okx_quant_lab.demo_execution as mod
+        self.sleeps: list = []
+        original = mod._SLEEP
+        mod._SLEEP = self.sleeps.append
+        self.addCleanup(lambda: setattr(mod, "_SLEEP", original))
+        self.mod = mod
+
+    def test_order_still_working_is_polled_until_filled(self) -> None:
+        request_fn = _scripted_details(["live", "live", "filled"])
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn)
+
+        record = executor.submit(_request(), confirmed=True)
+
+        self.assertEqual(record.status, "FILLED")
+        self.assertAlmostEqual(record.fill_quantity, 0.0985)
+        self.assertEqual(request_fn.calls["get"], 3)
+        self.assertEqual(len(self.sleeps), 2)
+
+    def test_polling_is_bounded_then_records_submitted(self) -> None:
+        request_fn = _scripted_details(["live"])
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn)
+
+        record = executor.submit(_request(), confirmed=True)
+
+        self.assertEqual(record.status, "SUBMITTED")
+        self.assertEqual(self.sleeps, list(self.mod._FILL_POLL_DELAYS))
+        self.assertEqual(request_fn.calls["get"], len(self.mod._FILL_POLL_DELAYS) + 1)
+
+    def test_failed_requery_keeps_submitted_not_error(self) -> None:
+        request_fn = _scripted_details(["live", TimeoutError("read timed out")])
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn)
+
+        record = executor.submit(_request(), confirmed=True)
+
+        self.assertEqual(record.status, "SUBMITTED")
+        self.assertEqual(record.exchange_order_id, "ord-late")
+
+    def test_refresh_submitted_resolves_a_late_fill_in_place(self) -> None:
+        request_fn = _scripted_details(["live"])
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn)
+        executor.submit(_request("a"), confirmed=True)
+        submitted = executor.records[0]
+        saved: list = []
+        later = DemoOrderExecutor(
+            CREDENTIALS, DemoExecutionLimits(), records=[submitted],
+            request_fn=_scripted_details(["filled"]), on_record=saved.append,
+        )
+
+        resolved = later.refresh_submitted()
+
+        self.assertEqual(len(resolved), 1)
+        old, new = resolved[0]
+        self.assertEqual((old.status, new.status), ("SUBMITTED", "FILLED"))
+        self.assertAlmostEqual(new.fill_quantity, 0.0985)
+        self.assertIn("resolved to state=filled", new.message)
+        self.assertEqual(later.records, [new])
+        self.assertEqual(saved, [])  # the caller persists, state first
+        # The id stays consumed.
+        self.assertEqual(later.submit(_request("a"), confirmed=True).status, "DUPLICATE")
+
+    def test_refresh_submitted_leaves_working_and_unreachable_orders_alone(self) -> None:
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(),
+                                     request_fn=_scripted_details(["live"]))
+        executor.submit(_request("b"), confirmed=True)
+        submitted = executor.records[0]
+        for script in (["live"], [OSError("down")]):
+            with self.subTest(script=script):
+                later = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(),
+                                          records=[submitted],
+                                          request_fn=_scripted_details(script))
+                self.assertEqual(later.refresh_submitted(), [])
+                self.assertEqual(later.records, [submitted])
