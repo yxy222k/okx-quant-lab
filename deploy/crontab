@@ -1,0 +1,7 @@
+# OKX demo grid (phase 2) + paper strategy + daily summary.
+# Server TZ is Asia/Shanghai; cron reads these times as local time.
+# Install: crontab deploy/crontab   (replaces root's crontab)
+SHELL=/bin/bash
+2,17,32,47 * * * * cd /root/okx_quant_lab && { date -u +"== \%F \%T UTC"; flock -n /tmp/okx_grid.lock /usr/bin/python3 scripts/lesson_28_demo_grid_loop.py --confirm --watchdog; } >> logs/grid.log 2>&1
+5 * * * *          cd /root/okx_quant_lab && { date -u +"== \%F \%T UTC"; flock -n /tmp/okx_hourly.lock /usr/bin/python3 scripts/hourly_update.py --watchdog; } >> logs/hourly.log 2>&1
+0 20 * * *         cd /root/okx_quant_lab && { date -u +"== \%F \%T UTC"; /usr/bin/python3 scripts/daily_summary.py; } >> logs/daily.log 2>&1
