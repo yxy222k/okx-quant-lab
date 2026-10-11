@@ -77,6 +77,9 @@ LIVE_UNBOOKED = {
     # cTime 13:17:27.695, fillTime 13:17:37.805 (10.1 s late). Slot 16 stayed
     # empty+armed, so live retried L16 at 14:00/14:15 (canceled by the demo
     # price band) and bought it again at 14:30 — exactly what the exchange shows.
+    # On 2026-10-12 this lot was booked by hand into slot L19 (cash -5, FILLED
+    # ledger record); a rebuild after that date must re-apply it with
+    # demo_grid.apply_late_fill(..., slot=19) once the replay reaches that day.
     "demogrid:ETH-USDT:1790168400000:BUY:L16": "filled 10.1 s after create; live saw it working",
 }
 STAGES = ["fills", "map", "replay", "check", "forward", "preview"]
