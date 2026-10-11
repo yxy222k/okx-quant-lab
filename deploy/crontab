@@ -1,7 +1,10 @@
 # OKX demo grid (phase 2) + paper strategy + daily summary.
 # Server TZ is Asia/Shanghai; cron reads these times as local time.
 # Install: crontab deploy/crontab   (replaces root's crontab)
+# Each job logs its output and forwards it to Telegram (scripts/notify_telegram.py,
+# config ~/.config/okx/telegram.env); --watchdog jobs print, and so notify, only
+# when something happened. In crontab a bare % is a newline: keep the \% escapes.
 SHELL=/bin/bash
-2,17,32,47 * * * * cd /root/okx_quant_lab && { date -u +"== \%F \%T UTC"; flock -n /tmp/okx_grid.lock /usr/bin/python3 scripts/lesson_28_demo_grid_loop.py --confirm --watchdog; } >> logs/grid.log 2>&1
-5 * * * *          cd /root/okx_quant_lab && { date -u +"== \%F \%T UTC"; flock -n /tmp/okx_hourly.lock /usr/bin/python3 scripts/hourly_update.py --watchdog; } >> logs/hourly.log 2>&1
-0 20 * * *         cd /root/okx_quant_lab && { date -u +"== \%F \%T UTC"; /usr/bin/python3 scripts/daily_summary.py; } >> logs/daily.log 2>&1
+2,17,32,47 * * * * cd /root/okx_quant_lab && { date -u +"== \%F \%T UTC"; out=$(flock -n /tmp/okx_grid.lock /usr/bin/python3 scripts/lesson_28_demo_grid_loop.py --confirm --watchdog 2>&1); printf '\%s\n' "$out"; printf '\%s' "$out" | /usr/bin/python3 scripts/notify_telegram.py --prefix "[grid]"; } >> logs/grid.log 2>&1
+5 * * * *          cd /root/okx_quant_lab && { date -u +"== \%F \%T UTC"; out=$(flock -n /tmp/okx_hourly.lock /usr/bin/python3 scripts/hourly_update.py --watchdog 2>&1); printf '\%s\n' "$out"; printf '\%s' "$out" | /usr/bin/python3 scripts/notify_telegram.py --prefix "[hourly]"; } >> logs/hourly.log 2>&1
+0 20 * * *         cd /root/okx_quant_lab && { date -u +"== \%F \%T UTC"; out=$(/usr/bin/python3 scripts/daily_summary.py 2>&1); printf '\%s\n' "$out"; printf '\%s' "$out" | /usr/bin/python3 scripts/notify_telegram.py; } >> logs/daily.log 2>&1
