@@ -167,7 +167,22 @@ class DemoOrderExecutor:
             )
 
         order_id = result["ordId"]
-        details = self._fetch_order_details(request.inst_id, order_id)
+        try:
+            details = self._fetch_order_details(request.inst_id, order_id)
+        except (RuntimeError, OSError, ValueError) as error:
+            # The order IS placed; only reading its status failed. ERROR would
+            # drop the exchange order id, refresh_submitted would never book
+            # the fill, and the slot would buy again on its next trigger.
+            return self._record(
+                request,
+                "SUBMITTED",
+                exchange_order_id=order_id,
+                exchange_client_order_id=exchange_client_order_id,
+                message=(
+                    f"placed; status query failed ({type(error).__name__}: {error}); "
+                    "re-checked next run"
+                ),
+            )
         for delay in _FILL_POLL_DELAYS:
             if details.get("state", "") in _TERMINAL_STATES:
                 break

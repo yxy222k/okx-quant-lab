@@ -552,3 +552,38 @@ class LateFillTest(unittest.TestCase):
                                           request_fn=_scripted_details(script))
                 self.assertEqual(later.refresh_submitted(), [])
                 self.assertEqual(later.records, [submitted])
+
+    def test_failed_first_query_keeps_submitted_with_the_order_id(self) -> None:
+        # The POST succeeded, so the order exists; only the status read failed.
+        # Recording ERROR here would drop the exchange order id, and
+        # refresh_submitted (SUBMITTED-only) would never book the fill — the
+        # slot would buy a second time on its next trigger.
+        request_fn = _scripted_details([TimeoutError("read timed out"), "filled"])
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn)
+
+        record = executor.submit(_request("c"), confirmed=True)
+
+        self.assertEqual(record.status, "SUBMITTED")
+        self.assertEqual(record.exchange_order_id, "ord-late")
+        self.assertIn("TimeoutError", record.message)
+        self.assertEqual(self.sleeps, [])  # no polling on an unreadable order
+
+        later = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), records=[record],
+                                  request_fn=_scripted_details(["filled"]))
+        resolved = later.refresh_submitted()
+        self.assertEqual([new.status for _, new in resolved], ["FILLED"])
+        self.assertEqual(later.submit(_request("c"), confirmed=True).status, "DUPLICATE")
+
+    def test_first_query_order_id_mismatch_also_keeps_submitted(self) -> None:
+        # _fetch_order_details raises on a response for some other order; that
+        # is still "placed, outcome unread", not a failed placement.
+        def request_fn(credentials, method, path, body=None):
+            if method == "POST":
+                return {"code": "0", "data": [{"sCode": "0", "ordId": "ord-late"}]}
+            return {"code": "0", "data": [{"ordId": "someone-else", "state": "filled"}]}
+
+        executor = DemoOrderExecutor(CREDENTIALS, DemoExecutionLimits(), request_fn=request_fn)
+        record = executor.submit(_request("d"), confirmed=True)
+
+        self.assertEqual(record.status, "SUBMITTED")
+        self.assertEqual(record.exchange_order_id, "ord-late")
