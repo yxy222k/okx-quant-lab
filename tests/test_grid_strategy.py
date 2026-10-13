@@ -140,6 +140,42 @@ class GridStrategyTest(unittest.TestCase):
         self.assertAlmostEqual(config.upper_price, 115.0)
 
 
+class NoTradeSpanTest(unittest.TestCase):
+    """Downtime mirror for reconciliation: a no-trade candle may re-arm a slot
+    and is marked to market, but never fills (2026-10 outage)."""
+
+    CONFIG = GridBacktestConfig(
+        lower_price=90, upper_price=110, grid_count=2, initial_cash=1_000, fee_rate=0
+    )
+
+    def test_default_is_unchanged(self) -> None:
+        candles = [
+            _candle(0, open=105, high=105, low=99, close=100),
+            _candle(1, open=100, high=111, low=100, close=110),
+        ]
+        plain = run_grid_backtest(candles, self.CONFIG)
+        explicit = run_grid_backtest(candles, self.CONFIG, no_trade=lambda ts: False)
+        self.assertEqual(plain, explicit)
+
+    def test_no_fills_inside_the_span_but_slots_still_rearm(self) -> None:
+        # Slot 1 (level 100) starts disarmed: the first open is 99, below it.
+        candles = [
+            _candle(0, open=99, high=99, low=98, close=99),
+            _candle(1, open=99, high=106, low=98, close=105),  # blocked; close re-arms slot 1
+            _candle(2, open=105, high=105, low=99, close=100),  # blocked; touches 100, no buy
+            _candle(3, open=100, high=100, low=99, close=99),   # tradable; buys slot 1
+        ]
+        blocked = {candles[1].timestamp_ms, candles[2].timestamp_ms}
+
+        result = run_grid_backtest(candles, self.CONFIG, no_trade=lambda ts: ts in blocked)
+
+        self.assertEqual([(f.side, f.timestamp_ms) for f in result.fills],
+                         [("BUY", candles[3].timestamp_ms)])
+        # Without the span, slot 1 buys on candle 2 instead.
+        free = run_grid_backtest(candles, self.CONFIG)
+        self.assertEqual([f.timestamp_ms for f in free.fills], [candles[2].timestamp_ms])
+
+
 def _candle(index: int, open: float, high: float, low: float, close: float) -> Candle:
     return Candle(
         timestamp_ms=1_700_000_000_000 + index * 3_600_000,

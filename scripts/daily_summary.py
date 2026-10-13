@@ -138,6 +138,7 @@ def _reconcile_line() -> str:
         worst_flatter = 0.0
         worst_gap = 0.0
         stale = []
+        outage_days = 0.0
         for inst_id in MARKETS:
             row = reconcile_market(inst_id, ROOT)
             if not row:
@@ -148,6 +149,7 @@ def _reconcile_line() -> str:
             if row.get("status") != "ok":
                 continue
             sym = inst_id.split("-")[0]
+            outage_days = max(outage_days, row.get("outage_days", 0.0))
             if row["flatter"] is not None:
                 fills.append(f"{sym} {row['flatter']:.1f}x")
                 worst_flatter = max(worst_flatter, row["flatter"])
@@ -166,6 +168,8 @@ def _reconcile_line() -> str:
             out.append("权益差(纸面−实盘) " + ", ".join(gaps) + flag)
         if stale:
             out.append("历史不足: " + ", ".join(stale))
+        if outage_days >= 0.5:
+            out.append(f"已剔除停机 {outage_days:.0f} 天")
         return "对账: " + " | ".join(out)
     except Exception as error:
         return f"对账: 计算失败 {type(error).__name__}"

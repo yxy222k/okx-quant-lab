@@ -393,6 +393,14 @@ def run_market(inst_id: str, fills: list[dict], upto: int, problems: list[str]) 
     forward_state, forward_events = advance_demo_grid(
         candles, state, config, blocker, spec, confirmed=True
     )
+    skipped = [c.timestamp_ms for c in candles
+               if state.last_timestamp_ms < c.timestamp_ms <= forward_state.last_timestamp_ms]
+    if skipped:
+        # Record the span so reconciliation keeps the paper replay from
+        # trading through downtime the live grid could not trade through.
+        forward_state = replace(
+            forward_state, outages=[*forward_state.outages, [skipped[0], skipped[-1]]]
+        )
     changed = [i for i in range(config.grid_count) if forward_state.armed[i] != state.armed[i]]
     print(f"{inst_id}: [forward] {utc(state.last_timestamp_ms)} -> "
           f"{utc(forward_state.last_timestamp_ms)} UTC, {blocker.blocked} would-be orders BLOCKED "

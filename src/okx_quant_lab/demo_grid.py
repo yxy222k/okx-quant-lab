@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -39,6 +39,11 @@ class DemoGridState:
     # reconciliation replay window so it survives candle-file trimming; 0 means
     # unknown (legacy state written before this field existed).
     deploy_timestamp_ms: int = 0
+    # Spans the grid did NOT trade: [first_ms, last_ms] candle timestamps,
+    # inclusive, that were advanced with every order blocked (a downtime
+    # fast-forward). Reconciliation mirrors them in the paper replay so the
+    # paper model is not credited with fills the live bot could not make.
+    outages: list[list[int]] = field(default_factory=list)
 
 
 def new_demo_grid_state(config: DemoGridConfig, reference_price: float) -> DemoGridState:
@@ -188,6 +193,7 @@ def advance_demo_grid(
         day_start_equity=day_start_equity,
         breaker_tripped=breaker_tripped,
         deploy_timestamp_ms=state.deploy_timestamp_ms,
+        outages=state.outages,
     )
     return new_state, events
 
@@ -243,6 +249,10 @@ def apply_late_fill(
                        f"qty={record.fill_quantity:.8f}")
 
 
+def in_outage(state: DemoGridState, timestamp_ms: int) -> bool:
+    return any(first <= timestamp_ms <= last for first, last in state.outages)
+
+
 def demo_grid_equity(state: DemoGridState, mark_price: float) -> float:
     return state.cash + sum(state.holdings) * mark_price
 
@@ -268,6 +278,7 @@ def load_demo_grid_state(path: Path) -> DemoGridState:
         day_start_equity=float(data["day_start_equity"]),
         breaker_tripped=bool(data["breaker_tripped"]),
         deploy_timestamp_ms=int(data.get("deploy_timestamp_ms", 0)),
+        outages=[[int(first), int(last)] for first, last in data.get("outages", [])],
     )
 
 

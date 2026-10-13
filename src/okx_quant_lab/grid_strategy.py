@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from okx_quant_lab.market_math import liquidation_equity, max_drawdown_pct, slipped_price
 from okx_quant_lab.okx_public import Candle
@@ -66,7 +67,14 @@ def grid_config_from_reference(
     )
 
 
-def run_grid_backtest(candles: list[Candle], config: GridBacktestConfig) -> GridBacktestResult:
+def run_grid_backtest(
+    candles: list[Candle],
+    config: GridBacktestConfig,
+    no_trade: Callable[[int], bool] | None = None,
+) -> GridBacktestResult:
+    """`no_trade(timestamp_ms)` marks candles the grid sees but may not trade on:
+    slots still re-arm and equity is still marked, exactly like a live grid
+    fast-forwarded through downtime with every order blocked."""
     _validate_inputs(candles, config)
 
     sorted_candles = sorted(candles, key=lambda candle: candle.timestamp_ms)
@@ -87,10 +95,11 @@ def run_grid_backtest(candles: list[Candle], config: GridBacktestConfig) -> Grid
     candles_below_range = 0
 
     for candle in sorted_candles:
+        tradable = no_trade is None or not no_trade(candle.timestamp_ms)
         # Sells first: a slot bought in this candle cannot also sell in it,
         # because the intra-candle price path is unknown.
         for index in range(config.grid_count):
-            if holdings[index] > 0 and candle.high >= levels[index + 1]:
+            if tradable and holdings[index] > 0 and candle.high >= levels[index + 1]:
                 fill_price = slipped_price(levels[index + 1], "SELL", config.slippage_bps)
                 quantity = holdings[index]
                 gross = quantity * fill_price
@@ -112,7 +121,8 @@ def run_grid_backtest(candles: list[Candle], config: GridBacktestConfig) -> Grid
 
         for index in range(config.grid_count):
             if (
-                armed[index]
+                tradable
+                and armed[index]
                 and holdings[index] == 0
                 and candle.low <= levels[index]
                 and cash >= slot_cash

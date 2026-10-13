@@ -19,7 +19,7 @@ from pathlib import Path
 
 from okx_quant_lab.candle_store import load_candles_csv
 from okx_quant_lab.demo_execution import load_demo_order_ledger
-from okx_quant_lab.demo_grid import load_demo_grid_state
+from okx_quant_lab.demo_grid import in_outage, load_demo_grid_state
 from okx_quant_lab.grid_strategy import GridBacktestConfig, run_grid_backtest
 
 BAR = "15m"
@@ -51,6 +51,12 @@ def reconcile_market(inst_id: str, root: Path) -> dict | None:
 
     records = load_demo_order_ledger(ledger_file) if ledger_file.exists() else []
     filled = [r for r in records if r.status == "FILLED"]
+    # The ledger spans every deployment, but the paper replay covers only the
+    # current one: counting earlier phases' fills on the live side understated
+    # the ratio (0.4-0.6x on 2026-09-20, with phase-1 fills still in the file).
+    deploy_ts = getattr(state, "deploy_timestamp_ms", 0)
+    if deploy_ts > 0:
+        filled = [r for r in filled if r.request.created_at_ms > deploy_ts]
     demo_buy = sum(1 for r in filled if r.request.side == "BUY")
     demo_sell = sum(1 for r in filled if r.request.side == "SELL")
 
@@ -66,7 +72,12 @@ def reconcile_market(inst_id: str, root: Path) -> dict | None:
         fee_rate=FEE_RATE,
         slippage_bps=0.0,
     )
-    result = run_grid_backtest(window, config)
+    # Downtime the live grid fast-forwarded without trading: the paper replay
+    # sees those candles (slots re-arm) but may not fill on them either.
+    outages = state.outages
+    result = run_grid_backtest(
+        window, config, no_trade=(lambda ts: in_outage(state, ts)) if outages else None
+    )
     paper_buy = sum(1 for f in result.fills if f.side == "BUY")
     paper_sell = sum(1 for f in result.fills if f.side == "SELL")
     demo_total = demo_buy + demo_sell
@@ -94,6 +105,7 @@ def reconcile_market(inst_id: str, root: Path) -> dict | None:
         "paper_return_pct": result.return_pct,
         "demo_return_pct": demo_return_pct,
         "equity_gap_pct": result.return_pct - demo_return_pct,
+        "outage_days": sum(b - a for a, b in outages) / 86_400_000 if outages else 0.0,
     }
 
 

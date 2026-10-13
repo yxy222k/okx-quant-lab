@@ -17,6 +17,7 @@ from okx_quant_lab.demo_grid import (
     advance_demo_grid,
     apply_late_fill,
     demo_grid_equity,
+    in_outage,
     load_demo_grid_state,
     new_demo_grid_state,
     open_slot_count,
@@ -177,6 +178,31 @@ class DemoGridTest(unittest.TestCase):
             _candles([100, 94]), state, config, _executor([]), SPEC, confirmed=True
         )
         self.assertEqual(advanced.deploy_timestamp_ms, 12345)
+
+    def test_outages_survive_save_load_and_advance(self) -> None:
+        # The deployed code must carry this field through every save, or one
+        # cron cycle would silently erase the record reconciliation relies on.
+        import json
+        from dataclasses import asdict, replace
+
+        config = CONFIG
+        state = replace(new_demo_grid_state(config, 100.0), outages=[[100, 200]])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "s.json"
+            save_demo_grid_state(path, state)
+            self.assertEqual(load_demo_grid_state(path).outages, [[100, 200]])
+
+            legacy = asdict(new_demo_grid_state(config, 100.0))
+            del legacy["outages"]
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            self.assertEqual(load_demo_grid_state(path).outages, [])
+
+        advanced, _ = advance_demo_grid(
+            _candles([100, 94]), state, config, _executor([]), SPEC, confirmed=True
+        )
+        self.assertEqual(advanced.outages, [[100, 200]])
+        self.assertTrue(in_outage(advanced, 150))
+        self.assertFalse(in_outage(advanced, 201))
 
     def test_buys_on_close_below_level_and_sells_above(self) -> None:
         calls: list = []
