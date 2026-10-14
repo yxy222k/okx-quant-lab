@@ -1,5 +1,7 @@
 # OKX Quant Lab
 
+[![tests](https://github.com/yxy222k/okx-quant-lab/actions/workflows/tests.yml/badge.svg)](https://github.com/yxy222k/okx-quant-lab/actions/workflows/tests.yml)
+
 A small, safe workspace for learning quant trading on OKX.
 
 The rule for this lab is simple: start with public data, then backtesting, then paper trading, and only consider live trading after the strategy, risk controls, and monitoring are boringly reliable.
