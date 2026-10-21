@@ -1,4 +1,7 @@
-"""cocotb tests for rtl/grid_trigger.v.
+"""cocotb tests for the grid trigger, run once per variant (run.py picks
+the toplevel: grid_trigger, grid_trigger_p2, ...). All variants share ports
+and rules; they differ in latency and in how often a new candle may enter,
+which TIMING pins down per variant.
 
 test_directed           a hand-checked scenario (budget gating, sell, re-arm)
 test_matches_python_*   replays the phase-2 grid over the cached 15m candles
@@ -7,7 +10,10 @@ test_matches_python_*   replays the phase-2 grid over the cached 15m candles
 test_random_boundaries  the same check on synthetic closes that sit exactly
                         on, or one tick either side of, a level, with cash
                         kept short so the buy budget actually binds — real
-                        candles hit neither edge
+                        candles hit neither edge. Streams the candles back
+                        to back as fast as in_ready allows, so it also checks
+                        the pipeline's hazards and measures its throughput
+test_latency            cycles from a candle going in to its result coming out
 
 Run through ../run.py (it sets up the simulator and paths).
 """
@@ -39,6 +45,14 @@ DEPLOY_TIMESTAMP_MS = 1788703200000  # phase-2 deploy candle, 2026-09-06 14:00 U
 REFERENCE_PRICES = {"BTC-USDT": 79757.4, "ETH-USDT": 2488.27, "SOL-USDT": 106.41}
 
 
+# toplevel -> (latency in cycles, initiation interval: cycles between candles)
+TIMING = {
+    "grid_trigger": (1, 1),
+    "grid_trigger_p2": (2, 1),
+    "grid_trigger_p3": (3, 2),
+}
+
+
 def mask(bits) -> int:
     return sum(1 << i for i, bit in enumerate(bits) if bit)
 
@@ -47,9 +61,14 @@ def bits_of(value: int) -> list[int]:
     return [i for i in range(N) if value >> i & 1]
 
 
+RESULTS = ("sell_mask", "buy_mask", "held", "armed")
+
+
 class Driver:
-    """Writes inputs on the falling edge, reads registered results after the
-    next rising edge."""
+    """Writes inputs on the falling edge, reads registered results after a
+    rising edge. A candle is accepted on the rising edge that sees
+    candle_valid with in_ready high; in_ready comes from registers, so its
+    value at the falling edge holds through the next rising edge."""
 
     def __init__(self, dut) -> None:
         self.dut = dut
@@ -76,18 +95,53 @@ class Driver:
         await FallingEdge(self.dut.clk)
         self.dut.state_we.value = 0
 
+    def _read(self) -> dict[str, int]:
+        return {name: getattr(self.dut, name).value.to_unsigned() for name in RESULTS}
+
     async def candle(self, close: int, budget: int) -> dict[str, int]:
+        """One candle, waiting for its result; records the latency."""
+        while self.dut.in_ready.value != 1:
+            await FallingEdge(self.dut.clk)
         self.dut.candle_valid.value = 1
         self.dut.close.value = close
         self.dut.budget.value = budget
-        await RisingEdge(self.dut.clk)
-        await ReadOnly()
-        assert self.dut.out_valid.value == 1
-        result = {name: getattr(self.dut, name).value.to_unsigned()
-                  for name in ("sell_mask", "buy_mask", "held", "armed")}
+        self.latency = 0
+        while True:
+            await RisingEdge(self.dut.clk)
+            await ReadOnly()
+            self.latency += 1
+            if self.dut.out_valid.value == 1:
+                result = self._read()
+                break
+            await FallingEdge(self.dut.clk)
+            self.dut.candle_valid.value = 0
+            assert self.latency < 16, "no result"
         await FallingEdge(self.dut.clk)
         self.dut.candle_valid.value = 0
         return result
+
+    async def stream(self, inputs: list[tuple[int, int]]) -> list[dict[str, int]]:
+        """Present the candles back to back whenever in_ready allows; return
+        the results in order. Records the clock cycles taken."""
+        results: list[dict[str, int]] = []
+        sent = 0
+        self.cycles = 0
+        while len(results) < len(inputs):
+            if sent < len(inputs) and self.dut.in_ready.value == 1:
+                self.dut.candle_valid.value = 1
+                self.dut.close.value, self.dut.budget.value = inputs[sent]
+                sent += 1
+            else:
+                self.dut.candle_valid.value = 0
+            await RisingEdge(self.dut.clk)
+            await ReadOnly()
+            self.cycles += 1
+            if self.dut.out_valid.value == 1:
+                results.append(self._read())
+            assert self.cycles < 16 * (len(inputs) + 16), "pipeline stalled"
+            await FallingEdge(self.dut.clk)
+        self.dut.candle_valid.value = 0
+        return results
 
 
 @cocotb.test()
@@ -172,33 +226,49 @@ async def replay_market(dut, inst_id: str) -> None:
     await check_against_python(dut, inst_id, config, spec, levels, state, candles)
 
 
-async def check_against_python(dut, label, config, spec, levels, state, candles) -> None:
+def python_reference(config, spec, state, candles):
+    """Per candle: the (close, budget) the chip gets and the result
+    advance_demo_grid says it must produce."""
+    inputs, expected = [], []
+    for candle in candles:
+        budget = buy_budget(state, config, spec, candle.close)
+        executor = FillAtClose()
+        state, _ = advance_demo_grid([candle], state, config, executor, spec, confirmed=True)
+        inputs.append((int(candle.close), budget))
+        expected.append({
+            "sell_mask": slot_mask(executor.requests, "SELL"),
+            "buy_mask": slot_mask(executor.requests, "BUY"),
+            "held": mask(h > 0 for h in state.holdings),
+            "armed": mask(state.armed),
+        })
+    return inputs, expected
+
+
+async def check_against_python(dut, label, config, spec, levels, state, candles,
+                               streaming: bool = False) -> None:
+    inputs, expected = python_reference(config, spec, state, candles)
 
     driver = Driver(dut)
     await driver.start()
     await driver.load(levels, held=mask(h > 0 for h in state.holdings),
                       armed=mask(state.armed))
+    if streaming:
+        got = await driver.stream(inputs)
+    else:
+        got = [await driver.candle(close, budget) for close, budget in inputs]
 
-    mismatches = []
-    buys = sells = 0
-    for candle in candles:
-        budget = buy_budget(state, config, spec, candle.close)
-        executor = FillAtClose()
-        state, _ = advance_demo_grid([candle], state, config, executor, spec, confirmed=True)
-        expected = {
-            "sell_mask": slot_mask(executor.requests, "SELL"),
-            "buy_mask": slot_mask(executor.requests, "BUY"),
-            "held": mask(h > 0 for h in state.holdings),
-            "armed": mask(state.armed),
-        }
-        got = await driver.candle(int(candle.close), budget)
-        buys += bin(expected["buy_mask"]).count("1")
-        sells += bin(expected["sell_mask"]).count("1")
-        if got != expected:
-            mismatches.append((candle.timestamp_ms, candle.close, budget, expected, got))
-
-    dut._log.info(f"{label}: {len(candles)} candles, {buys} buys, {sells} sells, "
-                  f"{len(mismatches)} mismatches")
+    mismatches = [(i, inputs[i], want, have)
+                  for i, (want, have) in enumerate(zip(expected, got)) if want != have]
+    buys = sum(bin(e["buy_mask"]).count("1") for e in expected)
+    sells = sum(bin(e["sell_mask"]).count("1") for e in expected)
+    note = ""
+    if streaming:
+        latency, interval = TIMING[dut._name]
+        note = f", streamed in {driver.cycles} cycles"
+        # n candles, one every `interval` cycles, plus the pipeline drain.
+        assert driver.cycles == interval * (len(inputs) - 1) + latency, driver.cycles
+    dut._log.info(f"{dut._name} {label}: {len(candles)} candles, {buys} buys, "
+                  f"{sells} sells, {len(mismatches)} mismatches{note}")
     assert buys and sells, "replay exercised no trades"
     assert not mismatches, mismatches[:3]
 
@@ -233,4 +303,14 @@ async def test_random_boundaries(dut) -> None:
         close = levels[index] + rng.choice((-1, 0, 1))
         candles.append(replace(template, close=float(close),
                                timestamp_ms=DEPLOY_TIMESTAMP_MS + (step + 1) * 900_000))
-    await check_against_python(dut, "random", config, spec, levels, state, candles)
+    await check_against_python(dut, "random", config, spec, levels, state, candles,
+                               streaming=True)
+
+
+@cocotb.test()
+async def test_latency(dut) -> None:
+    driver = Driver(dut)
+    await driver.start()
+    await driver.load([i * 100 for i in range(N + 1)], held=0, armed=0)
+    await driver.candle(550, budget=0)
+    assert driver.latency == TIMING[dut._name][0], driver.latency
